@@ -1,0 +1,28 @@
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Generated protobuf stubs (produced by codegen.sh — do not commit)
+generated/music_provider_pb2.py
+generated/music_provider_pb2_grpc.py
+generated/provider_link_pb2.py
+generated/provider_link_pb2_grpc.py
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+
+# Nuitka compiled output
+*.dist/
+*.onefile-build/
+
+# Credential files (never commit; stored at ~/.config/gozik/)
+ytmusic_auth.json
+ytmusic_oauth.json
