@@ -25,6 +25,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
+from webdriver_manager.core.os_manager import ChromeType
 
 from generated import music_provider_pb2 as pb
 from generated import music_provider_pb2_grpc as pb_grpc
@@ -160,7 +161,7 @@ def _selenium_auth_thread(result: Dict[str, Any]) -> None:
 
     driver: Optional[webdriver.Chrome] = None
     try:
-        service = ChromeService(ChromeDriverManager().install())
+        service = ChromeService(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
         driver = webdriver.Chrome(service=service, options=options)
         driver.get("https://music.youtube.com")
 

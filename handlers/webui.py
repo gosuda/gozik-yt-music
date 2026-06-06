@@ -15,7 +15,6 @@ import logging
 import os
 import threading
 import urllib.parse
-import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -238,10 +237,9 @@ async function startOAuth(){
   const res = await post("/login/initiate",{});
   const box = document.getElementById("oauthResult");
   if(res.error){ box.innerHTML = '<span style="color:var(--accent)">Error: '+res.error+'</span>'; return; }
-  if(res.auth_url){ window.open(res.auth_url, "_blank"); }
-  box.innerHTML = '<p><strong style="color:var(--accent2)">Browser opened automatically.</strong></p>'+
-    '<p>Log in to YouTube Music in the opened browser.</p>'+
-    '<p>Waiting for automatic detection...</p>';
+  box.innerHTML = '<p><strong style="color:var(--accent2)">Browser window opened.</strong></p>'+
+    '<p>A Chromium window was launched for YouTube Music.</p>'+
+    '<p>Please log in inside <strong>that</strong> window. The server will detect it automatically.</p>';
   document.getElementById("completeBtn").disabled = false;
   pollStatus();
 }
@@ -309,17 +307,11 @@ async function saveCookie(){
         def _login_initiate(self) -> None:
             try:
                 resp = servicer.InitiateAuth(pb.InitiateAuthRequest(), _FakeContext())
-                auth_url = resp.auth_url
-                if auth_url:
-                    try:
-                        webbrowser.open(auth_url)
-                    except Exception:
-                        pass
                 self._json({
-                    "auth_url": auth_url,
+                    "auth_url": resp.auth_url,
                     "device_code": resp.device_code,
                     "opened_browser": True,
-                    "message": "Browser opened. Log in to YouTube Music and wait...",
+                    "message": "A browser window has been opened. Please log in to YouTube Music in that window.",
                 })
             except Exception as exc:
                 logger.error("InitiateAuth via web UI failed: %s", exc)
