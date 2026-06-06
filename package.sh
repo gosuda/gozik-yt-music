@@ -27,6 +27,9 @@
 
 set -euo pipefail
 
+# Ensure temporary certifi copy is always cleaned up, even on failure.
+trap 'rm -rf "${SCRIPT_DIR}/certifi"' EXIT
+
 # ---------------------------------------------------------------------------
 # Script-level flag parsing
 # ---------------------------------------------------------------------------
@@ -51,9 +54,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${SCRIPT_DIR}/.venv"
 PYTHON="${VENV_DIR}/bin/python3"
 PIP="${VENV_DIR}/bin/pip"
-OUTPUT_DIR="${SCRIPT_DIR}/dist"
-ENTRY_POINT="${SCRIPT_DIR}/server.py"
+OUTPUT_DIR="dist"
+ENTRY_POINT="server.py"
 BINARY_NAME="gozik-yt-music-server"
+# Nuitka --file-version requires a Windows file-version string (X.Y.Z.W).
+# Extract numeric components from the latest git tag, or fall back to 0.0.0.0.
+GIT_TAG="$(git -C "${SCRIPT_DIR}" describe --tags --always 2>/dev/null || true)"
+if [[ "$GIT_TAG" =~ ^v?([0-9]+)(\.[0-9]+)?(\.[0-9]+)?(\.[0-9]+)? ]]; then
+    MAJOR="${BASH_REMATCH[1]}"
+    MINOR="${BASH_REMATCH[2]:-.0}"
+    PATCH="${BASH_REMATCH[3]:-.0}"
+    BUILD="${BASH_REMATCH[4]:-.0}"
+    VERSION="${MAJOR}${MINOR}${PATCH}${BUILD}"
+else
+    VERSION="0.0.0.0"
+fi
 BUILD_LOG="${OUTPUT_DIR}/build.log"
 BUILD_MANIFEST="${SCRIPT_DIR}/build_manifest.json"
 
@@ -152,6 +167,11 @@ log_step "Step 2: Prepare output directory"
 mkdir -p "${OUTPUT_DIR}"
 log_info "Output directory: ${OUTPUT_DIR}"
 
+# certifi PEM lives inside .venv; copy it locally so Nuitka does not embed
+# the absolute build-machine path (/workspace/...) into the binary strings.
+mkdir -p certifi
+cp "${CERTIFI_PEM}" certifi/cacert.pem
+
 # ---------------------------------------------------------------------------
 # Step 3 — Build the Nuitka argument list
 # ---------------------------------------------------------------------------
@@ -179,6 +199,9 @@ NUITKA_ARGS=(
     # per-version cache directory; subsequent launches skip extraction entirely.
     "--mode=onefile"
 
+    # --file-version is required for {VERSION} in --onefile-tempdir-spec
+    "--file-version=${VERSION}"
+
     # ---- Onefile extraction root ---------------------------------------------
     # Override the default /tmp extraction path with a stable XDG cache entry.
     # {CACHE_DIR} resolves to $XDG_CACHE_HOME (typically ~/.cache) at runtime.
@@ -187,7 +210,7 @@ NUITKA_ARGS=(
     "--onefile-tempdir-spec={CACHE_DIR}/gozik/ytmusic-server/{VERSION}"
 
     # ---- Output paths --------------------------------------------------------
-    "--output-dir=${OUTPUT_DIR}"
+    "--output-dir=dist"
     "--output-filename=${BINARY_NAME}"
 
     # ---- Explicit package inclusions -----------------------------------------
@@ -235,11 +258,11 @@ NUITKA_ARGS=(
     # The Mozilla CA bundle: certifi.where() returns the path to this .pem
     # file at runtime. It must exist at 'certifi/cacert.pem' relative to the
     # extraction root so the path stays correct after onefile unpacking.
-    "--include-data-files=${CERTIFI_PEM}=certifi/cacert.pem"
+    "--include-data-files=certifi/cacert.pem=certifi/cacert.pem"
 
     # Generated protobuf stubs directory. Even though Nuitka compiles them to
     # C, the generated/ package namespace must be anchored by its __init__.py.
-    "--include-data-dir=${SCRIPT_DIR}/generated=generated"
+    "--include-data-dir=generated=generated"
 
     # ---- Dead-code exclusions ------------------------------------------------
     # Each excluded module was confirmed unused by the server at runtime.
@@ -433,7 +456,10 @@ echo ""
 
 BUILD_START="$(date +%s)"
 
-# Run Nuitka. tee streams output to both the terminal and the persistent log.
+# Run Nuitka from the project root so every path in the command line is
+# relative — this prevents absolute workspace paths from leaking into the
+# compiled binary.
+cd "${SCRIPT_DIR}"
 "${PYTHON}" -m nuitka \
     "${NUITKA_ARGS[@]}" \
     "${ENTRY_POINT}" \

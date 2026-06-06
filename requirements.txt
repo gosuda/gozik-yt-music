@@ -2,3 +2,5 @@ grpcio==1.81.0
 grpcio-tools==1.81.0
 ytmusicapi==1.10.2
 yt-dlp==2025.1.26
+selenium>=4.0.0
+webdriver-manager>=4.0.0

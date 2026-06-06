@@ -5,7 +5,7 @@ Starts a gRPC server bound to 127.0.0.1:50051. Designed to run as a
 persistent background daemon alongside the gozik desktop player.
 
 Usage:
-    python3 server.py [--port PORT] [--workers N]
+    python3 server.py [--port PORT] [--workers N] [--web-ui-port PORT]
 
 Signals:
     SIGTERM / SIGINT — graceful shutdown with a configurable drain timeout.
@@ -27,10 +27,13 @@ import grpc
 # ---------------------------------------------------------------------------
 # Ensure the project root is on sys.path so both `generated` and `handlers`
 # packages are importable regardless of the working directory.
+# Skip this when running as a Nuitka onefile binary — everything is already
+# bundled and the source path should not leak into the runtime environment.
 # ---------------------------------------------------------------------------
-_PROJECT_ROOT = Path(__file__).resolve().parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+if "__compiled__" not in globals():
+    _PROJECT_ROOT = Path(__file__).resolve().parent
+    if str(_PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(_PROJECT_ROOT))
 
 from generated import music_provider_pb2_grpc  # noqa: E402
 from handlers.provider import MusicProviderServicer  # noqa: E402
@@ -52,6 +55,7 @@ logger = logging.getLogger("gozik.ytmusic.server")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 50051
 DEFAULT_WORKERS = 4
+DEFAULT_WEBUI_PORT = 50052
 GRACEFUL_SHUTDOWN_TIMEOUT_S = 10
 
 
@@ -77,10 +81,35 @@ def _parse_args() -> argparse.Namespace:
         default=int(os.environ.get("GOZIK_YTM_WORKERS", DEFAULT_WORKERS)),
         help=f"gRPC thread-pool worker count (default: {DEFAULT_WORKERS})",
     )
+    parser.add_argument(
+        "--web-ui-port",
+        type=int,
+        default=int(os.environ.get("GOZIK_YTM_WEBUI_PORT", DEFAULT_WEBUI_PORT)),
+        help=(
+            f"Web UI HTTP port (default: {DEFAULT_WEBUI_PORT}). "
+            "Set to 0 to disable the web UI."
+        ),
+    )
+    parser.add_argument(
+        "--register-desktop-entry",
+        choices=["auto", "always", "never"],
+        default=os.environ.get("GOZIK_YTM_REGISTER_DESKTOP", "auto"),
+        help=(
+            "Register a desktop entry (app-menu shortcut) for the web UI. "
+            "'auto' = register once if missing, 'always' = overwrite, "
+            "'never' = skip. (default: auto)"
+        ),
+    )
     return parser.parse_args()
 
 
-def serve(host: str, port: int, workers: int) -> None:
+def serve(
+    host: str,
+    port: int,
+    workers: int,
+    webui_port: int,
+    webui_register: str = "auto",
+) -> None:
     """Configure and run the gRPC server until a termination signal is received."""
 
     bind_address = f"{host}:{port}"
@@ -104,6 +133,21 @@ def serve(host: str, port: int, workers: int) -> None:
     servicer = MusicProviderServicer()
     music_provider_pb2_grpc.add_MusicProviderServiceServicer_to_server(servicer, server)
 
+    # Start the optional web UI in a background thread.
+    webui_server = None
+    if webui_port > 0:
+        from handlers.webui import start_webui
+        webui_server = start_webui(servicer, webui_port)
+
+        # Register a desktop entry so the user can launch the web UI from the
+        # app menu without remembering a CLI command or port number.
+        if webui_register != "never":
+            try:
+                from handlers.desktop_entry import register
+                register(webui_port=webui_port, force=(webui_register == "always"))
+            except Exception as exc:
+                logger.warning("Desktop entry registration failed: %s", exc)
+
     # Bind to loopback only — this daemon is never exposed externally.
     server.add_insecure_port(bind_address)
     server.start()
@@ -121,6 +165,9 @@ def serve(host: str, port: int, workers: int) -> None:
             sys.exit(1)
         logger.info("Received %s — initiating graceful shutdown (timeout: %ds)", sig_name, GRACEFUL_SHUTDOWN_TIMEOUT_S)
         _stop_event["triggered"] = True
+        if webui_server is not None:
+            logger.info("Shutting down web UI server")
+            webui_server.shutdown()
         server.stop(GRACEFUL_SHUTDOWN_TIMEOUT_S)
 
     signal.signal(signal.SIGTERM, _handle_signal)
@@ -137,7 +184,13 @@ def serve(host: str, port: int, workers: int) -> None:
 def main() -> None:
     """Entry point."""
     args = _parse_args()
-    serve(host=args.host, port=args.port, workers=args.workers)
+    serve(
+        host=args.host,
+        port=args.port,
+        workers=args.workers,
+        webui_port=args.web_ui_port,
+        webui_register=args.register_desktop_entry,
+    )
 
 
 if __name__ == "__main__":

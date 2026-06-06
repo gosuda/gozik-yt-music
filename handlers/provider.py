@@ -8,6 +8,7 @@ directory: ~/.config/gozik/ytmusic_auth.json
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -18,6 +19,12 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import grpc
 import ytmusicapi
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+from webdriver_manager.chrome import ChromeDriverManager
 
 from generated import music_provider_pb2 as pb
 from generated import music_provider_pb2_grpc as pb_grpc
@@ -115,6 +122,91 @@ def _build_ytmusic(auth_data: Optional[Dict[str, Any]] = None) -> ytmusicapi.YTM
 
     logger.info("Initialising unauthenticated YTMusic client")
     return ytmusicapi.YTMusic()
+
+
+# ---------------------------------------------------------------------------
+# Browser cookie auth via Selenium
+# ---------------------------------------------------------------------------
+
+def _generate_sapisid_auth(cookie_str: str) -> tuple[str, str]:
+    """Generate SAPISIDHASH authorization header from browser cookies."""
+    cookie_dict: Dict[str, str] = {}
+    for part in cookie_str.split(";"):
+        if "=" in part:
+            k, v = part.strip().split("=", 1)
+            cookie_dict[k] = v
+
+    sapisid = cookie_dict.get("SAPISID") or cookie_dict.get("__Secure-3PAPISID")
+    if not sapisid:
+        raise RuntimeError("SAPISID cookie not found — are you logged in?")
+
+    origin = "https://music.youtube.com"
+    ts = int(time.time())
+    msg = f"{ts} {sapisid} {origin}"
+    sha1 = hashlib.sha1(msg.encode()).hexdigest()
+    return f"SAPISIDHASH {ts}_{sha1}", "0"
+
+
+def _selenium_auth_thread(result: Dict[str, Any]) -> None:
+    """Open a real browser, wait for the user to log in, then harvest cookies
+    and build a ytmusicapi-compatible headers_auth.json file."""
+    options = webdriver.ChromeOptions()
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.binary_location = "/usr/bin/chromium"
+
+    driver: Optional[webdriver.Chrome] = None
+    try:
+        service = ChromeService(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        driver.get("https://music.youtube.com")
+
+        # Wait up to 5 minutes for the logged-in UI to appear.
+        WebDriverWait(driver, 300).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "ytmusic-pivot-bar-item-renderer"))
+        )
+
+        # Harvest cookies via Selenium (includes HttpOnly cookies).
+        cookies_list = driver.get_cookies()
+        cookie_dict = {c["name"]: c["value"] for c in cookies_list}
+        cookie_str = "; ".join(f"{k}={v}" for k, v in cookie_dict.items())
+
+        auth_header, auth_user = _generate_sapisid_auth(cookie_str)
+
+        visitor_id = driver.execute_script(
+            "try { return window.yt.config_.VISITOR_DATA; } catch(e) { return ''; }"
+        )
+        user_agent = driver.execute_script("return navigator.userAgent;")
+
+        headers: Dict[str, str] = {
+            "user-agent": user_agent,
+            "accept": "*/*",
+            "accept-encoding": "gzip, deflate",
+            "content-type": "application/json",
+            "content-encoding": "gzip",
+            "origin": "https://music.youtube.com",
+            "cookie": cookie_str,
+            "x-goog-authuser": auth_user,
+            "authorization": auth_header,
+        }
+        if visitor_id:
+            headers["x-goog-visitor-id"] = visitor_id
+
+        _AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(_AUTH_FILE, "w", encoding="utf-8") as f:
+            json.dump(headers, f, indent=4, ensure_ascii=True)
+
+        result["success"] = True
+        logger.info("Selenium auth succeeded — credentials saved to %s", _AUTH_FILE)
+    except Exception as exc:
+        logger.error("Selenium auth failed: %s", exc, exc_info=True)
+        result["error"] = str(exc)
+    finally:
+        if driver is not None:
+            driver.quit()
 
 
 def _auth_status() -> int:
@@ -328,6 +420,7 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         """Initialise the servicer, loading existing credentials if available."""
         self._lock = threading.Lock()
         self._ytm: Optional[ytmusicapi.YTMusic] = None
+        self._selenium_result: Dict[str, Any] = {}
         logger.info("MusicProviderServicer initialised — auth file: %s", _AUTH_FILE)
 
     # ------------------------------------------------------------------
@@ -378,59 +471,22 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         request: pb.InitiateAuthRequest,
         context: grpc.ServicerContext,
     ) -> pb.InitiateAuthResponse:
-        """Begin the OAuth2 device-code flow for YouTube Music.
-
-        Calls ytmusicapi's setup_oauth which opens a browser-less device
-        authorisation grant. The returned auth_url and device_code are
-        forwarded to the Go client so the user can visit the URL on any device.
-
-        The OAuth token file is written to _OAUTH_FILE by ytmusicapi itself
-        during CompleteAuth once the poll confirms the user has granted access.
-        """
-        logger.info("InitiateAuth: starting OAuth device-code flow")
-        try:
-            # ytmusicapi ≥1.5 exposes get_oauth_code() which returns the
-            # verification URL and user code without blocking.
-            oauth_helper = ytmusicapi.OAuthCredentials(
-                client_id=ytmusicapi.YTMusic.OAUTH_CLIENT_ID,
-                client_secret=ytmusicapi.YTMusic.OAUTH_CLIENT_SECRET,
-                proxies=None,
-                session=None,
-            )
-            code_response = oauth_helper.get_code()
-            auth_url: str = code_response.get("verification_url", "")
-            device_code: str = code_response.get("device_code", "")
-            # Stash the code response on the instance so CompleteAuth can poll it.
-            with self._lock:
-                self._pending_oauth = code_response
-            logger.info("InitiateAuth: device auth URL obtained — %s", auth_url)
-            return pb.InitiateAuthResponse(
-                auth_url=auth_url,
-                device_code=device_code,
-            )
-        except AttributeError:
-            # Older ytmusicapi versions do not expose OAuthCredentials directly.
-            # Fall back to providing a static OAuth consent URL.
-            logger.warning(
-                "ytmusicapi.OAuthCredentials not available; "
-                "returning manual browser-auth instructions"
-            )
-            auth_url = (
-                "https://accounts.google.com/o/oauth2/auth"
-                "?scope=https://www.googleapis.com/auth/youtube"
-                "&redirect_uri=urn:ietf:wg:oauth:2.0:oob"
-                "&response_type=code"
-                "&client_id=YOUR_CLIENT_ID"
-            )
-            return pb.InitiateAuthResponse(
-                auth_url=auth_url,
-                device_code="",
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.error("InitiateAuth error: %s", exc, exc_info=True)
-            context.abort(grpc.StatusCode.INTERNAL, f"Failed to initiate auth: {exc}")
-            # Unreachable — abort() raises; satisfies type checker.
-            return pb.InitiateAuthResponse()
+        """Launch a Selenium-controlled browser so the user can log in to
+        YouTube Music interactively.  Cookies are harvested automatically once
+        the logged-in UI is detected, and a ytmusicapi-compatible
+        headers_auth.json is written to disk."""
+        logger.info("InitiateAuth: launching Selenium browser auth")
+        with self._lock:
+            result: Dict[str, Any] = {}
+            self._selenium_result = result
+        thread = threading.Thread(
+            target=_selenium_auth_thread, args=(result,), daemon=True
+        )
+        thread.start()
+        return pb.InitiateAuthResponse(
+            auth_url="https://music.youtube.com",
+            device_code="",
+        )
 
     # ------------------------------------------------------------------
     # RPC: CompleteAuth
@@ -441,17 +497,31 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         request: pb.CompleteAuthRequest,
         context: grpc.ServicerContext,
     ) -> pb.CompleteAuthResponse:
-        """Finalise authentication using the OAuth device-code grant.
-
-        The *params* map may carry:
-        - "auth_code"   : The manual authorisation code from the consent page.
-        - "cookie_json" : A raw JSON string produced by ytmusicapi.setup().
-
-        Preference order: cookie_json > OAuth poll (if InitiateAuth was
-        called first) > auth_code exchange.
-        """
+        """Check whether the Selenium browser auth already finished and, if so,
+        mark the client as authenticated.  Falls back to the legacy
+        cookie_json / OAuth paths if Selenium did not run."""
         params: Dict[str, str] = dict(request.params)
         logger.info("CompleteAuth invoked with param keys: %s", list(params.keys()))
+
+        # ------------------------------------------------------------------
+        # Path 0: Selenium browser auth already succeeded in background.
+        # ------------------------------------------------------------------
+        with self._lock:
+            result = self._selenium_result
+        if result.get("success"):
+            self._invalidate_client()
+            logger.info("CompleteAuth: Selenium browser auth succeeded")
+            return pb.CompleteAuthResponse(
+                access_token="browser_cookie",
+                refresh_token="",
+                expires_at=0,
+            )
+        if result.get("error"):
+            context.abort(
+                grpc.StatusCode.UNAUTHENTICATED,
+                f"Browser auth failed: {result['error']}",
+            )
+            return pb.CompleteAuthResponse()
 
         # ------------------------------------------------------------------
         # Path 1: Browser cookie JSON provided directly.
@@ -464,7 +534,6 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
                     raise ValueError("cookie_json must be a JSON object")
                 _save_auth_file(cookie_data)
                 self._invalidate_client()
-                # There is no explicit expiry for cookie-based auth.
                 logger.info("CompleteAuth: browser cookie credentials saved")
                 return pb.CompleteAuthResponse(
                     access_token="browser_cookie",
@@ -488,7 +557,6 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
                     session=None,
                 )
                 token_response = oauth_helper.token_from_code(pending_oauth)
-                # Persist as the OAuth token file that YTMusic can consume.
                 _OAUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
                 _OAUTH_FILE.write_text(json.dumps(token_response, indent=2), encoding="utf-8")
                 with self._lock:
