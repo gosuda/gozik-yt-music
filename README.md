@@ -12,7 +12,7 @@ Implemented as a standalone background gRPC daemon that the gozik Go frontend co
 ┌─────────────────────────────────┐        gRPC / loopback
 │  gozik (Go + GTK3 frontend)     │  ──────────────────────►  ┌──────────────────────────────┐
 │  github.com/gosuda/gozik        │  127.0.0.1:50051          │  gozik-yt-music (this repo)  │
-│                                 │  ◄──────────────────────  │  Python 3 / Nuitka binary    │
+│                                 │  ◄──────────────────────  │  Python 3 + Node.js          │
 └─────────────────────────────────┘                           │  MusicProviderService gRPC   │
                                │                              └──────────────────────────────┘
                                │                                           │
