@@ -82,21 +82,11 @@ The proto source files live in the sibling `gozik` repository at `../gozik/api/m
 
 ### Running from source
 
-| Requirement | Version | Notes |
-|---|---|---|
-| Python | 3.11+ | 3.13 recommended |
-| pip | any | Used to install dependencies |
-| gozik repository | sibling directory | Required for `codegen.sh` to find `.proto` files |
-
-### Building a release binary
-
-| Requirement | Version | Notes |
-|---|---|---|
-| Python | 3.13 (`--enable-shared`) | `libpython3.13.so` must exist |
-| GCC | 11.0+ | Tested with GCC 14.2.0 |
-| patchelf | 0.14+ | RPATH rewriting inside onefile payload (Linux) |
-| ccache | any | Optional; speeds up re-builds ~6× |
-| Nuitka | 4.1.2 | Installed automatically by `package.sh` if absent |
+```bash
+make
+# make dev for running development server
+make install-user
+```
 
 ---
 
