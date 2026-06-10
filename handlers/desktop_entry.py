@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -52,26 +53,27 @@ def _icon_path() -> Path:
 def _executable_path() -> str:
     """Return the absolute path to the running executable.
 
-    For Nuitka onefile builds sys.executable points to the outer ELF stub,
+    For Nuitka onefile builds sys.executable points to the outer stub,
     which is what the desktop entry must invoke.
 
-    When running from source (python3 server.py) but a pre-built binary
-    exists in dist/, prefer the binary so the desktop entry is independent
-    of the development environment.
+    When running from source the entry points at the main script so the
+    desktop entry is at least functional on a machine with Python installed.
     """
-    # Nuitka onefile: sys.executable IS the binary itself.
-    if "__compiled__" in globals():
+    # Nuitka sets __compiled__ on the *main* module, not on this module.
+    main_module = sys.modules.get("__main__")
+    if main_module is not None and getattr(main_module, "__compiled__", None) is not None:
         return os.path.abspath(sys.executable)
 
-    # If a built binary exists next to the source tree, use it so the
-    # desktop entry does not point at the interpreter or a .py script.
-    project_root = Path(__file__).resolve().parent.parent
-    binary = project_root / "dist" / "gozik-yt-music-server"
-    if binary.exists() and os.access(binary, os.X_OK):
-        return str(binary)
+    # Heuristic: if sys.executable does not look like a Python interpreter,
+    # we are almost certainly running as a compiled binary (Nuitka onefile
+    # or PyInstaller, etc.).
+    exe_name = Path(sys.executable).name.lower()
+    if "python" not in exe_name and "pythonw" not in exe_name:
+        return os.path.abspath(sys.executable)
 
-    # Fallback to the current interpreter (development mode).
-    return os.path.abspath(sys.executable)
+    # Running from source: point at the entry-point script so the menu item
+    # at least works on machines that have Python installed.
+    return os.path.abspath(sys.argv[0])
 
 
 def _working_dir() -> str:
@@ -136,7 +138,7 @@ def _register_linux(webui_port: int, force: bool) -> bool:
     content = f"""[Desktop Entry]
 Name=gozik YouTube Music
 Comment=YouTube Music plugin web console
-Exec={exec_path} --web-ui-port {webui_port}
+Exec={shlex.quote(exec_path)} --web-ui-port {webui_port}
 Type=Application
 Terminal=false
 Icon={icon}
@@ -184,7 +186,7 @@ def install_system_desktop_entry(prefix: str = "/usr/local", webui_port: int = 5
     content = f"""[Desktop Entry]
 Name=gozik YouTube Music
 Comment=YouTube Music plugin web console
-Exec={exec_path} --web-ui-port {webui_port}
+Exec={shlex.quote(str(exec_path))} --web-ui-port {webui_port}
 Type=Application
 Terminal=false
 Icon={icon}

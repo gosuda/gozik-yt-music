@@ -1,47 +1,39 @@
 #!/usr/bin/env bash
 # =============================================================================
-# package.sh — Nuitka 4.x single-file build script for gozik-yt-music
+# package.sh — PyInstaller onedir build script for gozik-yt-music
 #
-# Produces a fully self-contained Linux binary at:
-#   ./dist/gozik-yt-music-server
+# Produces a self-contained Linux application directory at:
+#   ./dist/gozik-yt-music-server/
 #
-# The binary requires no Python interpreter, no virtualenv, and no pip packages
-# on the target machine. All dependencies are compiled and bundled inline.
+# The bundle contains the Python interpreter, all bytecode / extension modules,
+# and runtime data files. Unlike Nuitka, no C translation of Python code is
+# performed, which avoids the opaque crashes that sometimes result from
+# Python→C compilation of large dynamic packages (yt-dlp, grpc, protobuf).
 #
 # Requirements on the BUILD machine:
-#   - Python 3.13 (--enable-shared; libpython3.13.so must exist)
-#   - GCC 11+ or Clang 12+
-#   - patchelf 0.14+   (for RPATH rewriting inside the onefile payload)
-#   - ccache           (optional; recommended; speeds up re-builds ~6×)
+#   - Python 3.11+ (3.13 recommended)
 #   - Virtualenv at .venv/ with all dependencies installed:
 #       python3 -m venv .venv
 #       .venv/bin/pip install -r requirements.txt
-#       .venv/bin/pip install "nuitka==4.1.2"
 #   - Proto stubs generated:  bash codegen.sh
 #
 # Usage:
-#   bash package.sh               # production release build
-#   bash package.sh --debug       # retain C sources, enable verbose Nuitka trace
-#   bash package.sh --no-ccache   # disable compiler cache
+#   bash package.sh               # production build
+#   bash package.sh --debug       # PyInstaller debug / console traces
 # =============================================================================
 
 set -euo pipefail
-
-# Ensure temporary certifi copy is always cleaned up, even on failure.
-trap 'rm -rf "${SCRIPT_DIR}/certifi"' EXIT
 
 # ---------------------------------------------------------------------------
 # Script-level flag parsing
 # ---------------------------------------------------------------------------
 DEBUG_BUILD=0
-USE_CCACHE=1
 for arg in "$@"; do
     case "$arg" in
-        --debug)      DEBUG_BUILD=1 ;;
-        --no-ccache)  USE_CCACHE=0  ;;
+        --debug) DEBUG_BUILD=1 ;;
         *)
             echo "Unknown flag: $arg" >&2
-            echo "Usage: bash package.sh [--debug] [--no-ccache]" >&2
+            echo "Usage: bash package.sh [--debug]" >&2
             exit 1
             ;;
     esac
@@ -54,21 +46,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${SCRIPT_DIR}/.venv"
 PYTHON="${VENV_DIR}/bin/python3"
 PIP="${VENV_DIR}/bin/pip"
+PYINSTALLER="${VENV_DIR}/bin/pyinstaller"
 OUTPUT_DIR="dist"
 ENTRY_POINT="server.py"
 BINARY_NAME="gozik-yt-music-server"
-# Nuitka --file-version requires a Windows file-version string (X.Y.Z.W).
-# Extract numeric components from the latest git tag, or fall back to 0.0.0.0.
-GIT_TAG="$(git -C "${SCRIPT_DIR}" describe --tags --always 2>/dev/null || true)"
-if [[ "$GIT_TAG" =~ ^v?([0-9]+)(\.[0-9]+)?(\.[0-9]+)?(\.[0-9]+)? ]]; then
-    MAJOR="${BASH_REMATCH[1]}"
-    MINOR="${BASH_REMATCH[2]:-.0}"
-    PATCH="${BASH_REMATCH[3]:-.0}"
-    BUILD="${BASH_REMATCH[4]:-.0}"
-    VERSION="${MAJOR}${MINOR}${PATCH}${BUILD}"
-else
-    VERSION="0.0.0.0"
-fi
 BUILD_LOG="${OUTPUT_DIR}/build.log"
 BUILD_MANIFEST="${SCRIPT_DIR}/build_manifest.json"
 
@@ -98,62 +79,41 @@ if [[ ! -f "${PYTHON}" ]]; then
     log_error "Create it with:"
     log_error "  python3 -m venv .venv"
     log_error "  .venv/bin/pip install -r requirements.txt"
-    log_error "  .venv/bin/pip install 'nuitka==4.1.2'"
     exit 1
 fi
 
 PY_VERSION="$("${PYTHON}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")')"
 log_info "Python : ${PY_VERSION} (${PYTHON})"
 
-# Verify libpython.so is present (required for --mode=onefile).
-PY_ENABLE_SHARED="$("${PYTHON}" -c 'import sysconfig; print(sysconfig.get_config_var("Py_ENABLE_SHARED") or 0)')"
-if [[ "${PY_ENABLE_SHARED}" != "1" ]]; then
-    log_error "This Python build was not compiled with --enable-shared."
-    log_error "Nuitka --mode=onefile requires libpython*.so to be present."
-    log_error "Install the python3-dev / python3-shared package for your distro."
-    exit 1
-fi
-log_info "Shared libpython: found (Py_ENABLE_SHARED=1)"
-
-# Install Nuitka if absent.
-if ! "${PYTHON}" -c "import nuitka" 2>/dev/null; then
-    log_warn "Nuitka not found inside venv — installing nuitka==4.1.2 …"
-    "${PIP}" install --quiet "nuitka==4.1.2"
+# Install PyInstaller if absent.
+if ! "${PYTHON}" -c "import PyInstaller" 2>/dev/null; then
+    log_warn "PyInstaller not found inside venv — installing ..."
+    "${PIP}" install --quiet pyinstaller
 fi
 
-NUITKA_VER="$("${PYTHON}" -m nuitka --version 2>&1 | head -1)"
-log_info "Nuitka : ${NUITKA_VER}"
+PYINST_VER="$("${PYTHON}" -c 'import PyInstaller; print(PyInstaller.__version__)' 2>/dev/null || echo "unknown")"
+log_info "PyInstaller : ${PYINST_VER}"
 
 # Validate proto stubs.
 if [[ ! -f "${SCRIPT_DIR}/generated/music_provider_pb2.py" ]]; then
-    log_warn "Proto stubs missing — running codegen.sh …"
+    log_warn "Proto stubs missing — running codegen.sh ..."
     bash "${SCRIPT_DIR}/codegen.sh"
 fi
 log_info "Proto stubs: present"
 
-# Validate patchelf.
-if ! command -v patchelf &>/dev/null; then
-    log_error "patchelf is required for Nuitka --mode=onefile on Linux."
-    log_error "  sudo apt-get install patchelf"
-    exit 1
-fi
-log_info "patchelf: $(patchelf --version 2>&1 | head -1)"
-
-# ccache detection.
-if [[ "${USE_CCACHE}" -eq 1 ]] && command -v ccache &>/dev/null; then
-    log_info "ccache : enabled ($(ccache --version | head -1))"
-    # Nuitka auto-detects ccache when it appears before gcc on PATH.
-    export PATH="$(dirname "$(command -v ccache)"):${PATH}"
-else
-    USE_CCACHE=0
-    log_warn "ccache not available — fresh build will be slow"
-fi
-
 # Gather system info for the manifest.
-GCC_VER="$(gcc --version 2>&1 | head -1)"
 BUILD_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 GIT_COMMIT="$(git -C "${SCRIPT_DIR}" rev-parse --short HEAD 2>/dev/null || echo "n/a")"
-NUITKA_VER_SHORT="$("${PYTHON}" -c 'import nuitka; print(nuitka.__version__)' 2>/dev/null || echo "4.1.2")"
+GIT_TAG="$(git -C "${SCRIPT_DIR}" describe --tags --always 2>/dev/null || true)"
+if [[ "$GIT_TAG" =~ ^v?([0-9]+)(\.[0-9]+)?(\.[0-9]+)?(\.[0-9]+)? ]]; then
+    MAJOR="${BASH_REMATCH[1]}"
+    MINOR="${BASH_REMATCH[2]:-.0}"
+    PATCH="${BASH_REMATCH[3]:-.0}"
+    BUILD="${BASH_REMATCH[4]:-.0}"
+    VERSION="${MAJOR}${MINOR}${PATCH}${BUILD}"
+else
+    VERSION="0.0.0.0"
+fi
 JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 CERTIFI_PEM="$("${PYTHON}" -c 'import certifi; print(certifi.where())')"
 
@@ -161,168 +121,127 @@ log_info "Parallel jobs  : ${JOBS}"
 log_info "certifi bundle : ${CERTIFI_PEM}"
 
 # ---------------------------------------------------------------------------
-# Step 2 — Prepare output directory
+# Step 2 — Ensure latest yt-dlp nightly
 # ---------------------------------------------------------------------------
-log_step "Step 2: Prepare output directory"
+log_step "Step 2: Updating yt-dlp to latest nightly"
+
+if [[ "${YTDLP_SKIP_NIGHTLY:-0}" == "1" ]]; then
+    log_info "YTDLP_SKIP_NIGHTLY=1 — using existing yt-dlp (stable)"
+else
+    log_info "Installing latest yt-dlp nightly via pip ..."
+    "${PIP}" install -U --pre yt-dlp
+fi
+
+YTDLP_ACTUAL_VER="$("${PYTHON}" -c 'import yt_dlp.version; print(yt_dlp.version.__version__)' 2>/dev/null || echo "unknown")"
+log_info "yt-dlp version: ${YTDLP_ACTUAL_VER}"
+
+# ---------------------------------------------------------------------------
+# Step 3 — Prepare output directory and certifi copy
+# ---------------------------------------------------------------------------
+log_step "Step 3: Prepare output directory"
 mkdir -p "${OUTPUT_DIR}"
 log_info "Output directory: ${OUTPUT_DIR}"
 
-# certifi PEM lives inside .venv; copy it locally so Nuitka does not embed
-# the absolute build-machine path (/workspace/...) into the binary strings.
+# certifi PEM lives inside .venv; copy it locally so PyInstaller bundles it
+# from a relative path instead of an absolute build-machine path.
 mkdir -p certifi
 cp "${CERTIFI_PEM}" certifi/cacert.pem
 
 # ---------------------------------------------------------------------------
-# Step 3 — Build the Nuitka argument list
+# Download Node.js standalone binary for yt-dlp JS challenges
 # ---------------------------------------------------------------------------
-log_step "Step 3: Assembling Nuitka command"
-
-# NOTE ON NUITKA 4.x API CHANGES vs earlier series:
-#
-#   --mode=onefile       replaces the older --onefile flag.
-#                        Internally, 'onefile' mode implies 'standalone'; no
-#                        separate --standalone flag is accepted alongside it.
-#
-#   --assume-yes-for-downloads  (plural) replaces --assume-yes-for-download.
-#
-#   --include-package=   syntax unchanged from 1.x/2.x.
-#
-#   --nofollow-import-to= syntax unchanged.
-#
-#   --lto=yes            unchanged.
-
-NUITKA_ARGS=(
-    # ---- Packaging mode -------------------------------------------------------
-    # 'onefile' compresses the entire standalone tree (all .so, stdlib, and
-    # third-party packages) into a single zstd-compressed ELF using Nuitka's
-    # own bootstrap loader. On first launch the payload is extracted to a
-    # per-version cache directory; subsequent launches skip extraction entirely.
-    "--mode=onefile"
-
-    # --file-version is required for {VERSION} in --onefile-tempdir-spec
-    "--file-version=${VERSION}"
-
-    # ---- Onefile extraction root ---------------------------------------------
-    # Override the default /tmp extraction path with a stable XDG cache entry.
-    # {CACHE_DIR} resolves to $XDG_CACHE_HOME (typically ~/.cache) at runtime.
-    # {VERSION}   is replaced with the Nuitka-computed content hash, ensuring
-    # that different binary releases never share the same extraction directory.
-    "--onefile-tempdir-spec={CACHE_DIR}/gozik/ytmusic-server/{VERSION}"
-
-    # ---- Output paths --------------------------------------------------------
-    "--output-dir=dist"
-    "--output-filename=${BINARY_NAME}"
-
-    # ---- Explicit package inclusions -----------------------------------------
-    #
-    # ytmusicapi — dynamic mixin loading and importlib.resources usage means
-    #   Nuitka's static import tracer does not discover all submodules. Full
-    #   recursive inclusion is the only reliable approach.
-    "--include-package=ytmusicapi"
-
-    # grpc — the runtime discovers submodules via __import__ strings, and the
-    #   Cython extension (_cygrpc.so) is only referenced at runtime. Nuitka
-    #   must be told to copy the entire grpc namespace.
-    "--include-package=grpc"
-    "--include-package=grpc._cython"
-
-    # google.protobuf — protobuf 4+ has a C-extension fast path; both the
-    #   fast path and the pure-Python fallback must be present. The 'internal'
-    #   namespace is particularly prone to being skipped by static analysis.
-    "--include-package=google.protobuf"
-    "--include-package=google.protobuf.internal"
-
-    # yt_dlp — 1100+ submodules loaded via plugin discovery strings. Any
-    #   partial inclusion causes runtime ImportError for extractor plugins.
-    "--include-package=yt_dlp"
-    "--include-package=yt_dlp.extractor"
-
-    # Standard HTTP stack used by ytmusicapi.
-    "--include-package=requests"
-    "--include-package=certifi"
-    "--include-package=charset_normalizer"
-    "--include-package=idna"
-    "--include-package=urllib3"
-
-    # Project-local packages: generated protobuf stubs and the RPC handler.
-    "--include-package=generated"
-    "--include-package=handlers"
-
-    # ---- Data file inclusions ------------------------------------------------
-    #
-    # Package-internal data files (schema JSON, locale data, etc.) inside the
-    # ytmusicapi and grpc wheels.
-    "--include-package-data=ytmusicapi"
-    "--include-package-data=grpc"
-
-    # The Mozilla CA bundle: certifi.where() returns the path to this .pem
-    # file at runtime. It must exist at 'certifi/cacert.pem' relative to the
-    # extraction root so the path stays correct after onefile unpacking.
-    "--include-data-files=certifi/cacert.pem=certifi/cacert.pem"
-
-    # Generated protobuf stubs directory. Even though Nuitka compiles them to
-    # C, the generated/ package namespace must be anchored by its __init__.py.
-    "--include-data-dir=generated=generated"
-
-    # ---- Dead-code exclusions ------------------------------------------------
-    # Each excluded module was confirmed unused by the server at runtime.
-    # Exclusion saves ~40 MB of payload space and reduces extraction time.
-    "--nofollow-import-to=tkinter"       # GUI toolkit — headless server
-    "--nofollow-import-to=unittest"      # test framework
-    "--nofollow-import-to=test"          # CPython internal test suite
-    "--nofollow-import-to=distutils"     # build infrastructure
-    "--nofollow-import-to=grpc_tools"    # build-time proto compiler only
-    "--nofollow-import-to=lib2to3"       # Python 2→3 migration tool
-    "--nofollow-import-to=pydoc"         # documentation generator
-    "--nofollow-import-to=doctest"       # testing framework
-
-    # ---- Python runtime flags ------------------------------------------------
-    # no_site  — prevents the embedded runtime from scanning system site-packages
-    #            on startup, which could cause incompatible system packages to
-    #            shadow the bundled ones.
-    "--python-flag=no_site"
-
-    # no_warnings — suppresses DeprecationWarning from protobuf/grpc internals
-    #               in the production binary (they are still enabled in --debug).
-    "--python-flag=no_warnings"
-
-    # ---- Nuitka plugins ------------------------------------------------------
-    # anti-bloat strips test harnesses, Jupyter kernels, and other heavyweight
-    # unused imports that several third-party packages pull in at module level.
-    # Consistently reduces binary size by 15-30% with zero runtime impact.
-    # NOTE: Nuitka 4.x uses --enable-plugins= (plural).
-    "--enable-plugins=anti-bloat"
-
-    # ---- Non-interactive / CI mode -------------------------------------------
-    # Nuitka may download a CPython base archive the first time it compiles a
-    # standalone binary on this machine. This flag suppresses the interactive
-    # confirmation prompt, which is required for automated CI pipelines.
-    "--assume-yes-for-downloads"
-
-    # ---- Parallelism ---------------------------------------------------------
-    "--jobs=${JOBS}"
-)
-
-# Release-only flags.
-if [[ "${DEBUG_BUILD}" -eq 0 ]]; then
-    # Remove intermediate .build/ directory after the onefile is assembled.
-    NUITKA_ARGS+=("--remove-output")
-    # Link-Time Optimisation: reduces binary size ~5% and enables cross-
-    # translation-unit inlining. Adds ~30% to total build time; acceptable for
-    # release builds, disabled for the inner dev loop (--debug).
-    NUITKA_ARGS+=("--lto=yes")
-    log_info "Build mode: RELEASE (--lto=yes, --remove-output)"
+NODE_URL="https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz"
+if [[ ! -x "${SCRIPT_DIR}/.tools/bin/node" ]]; then
+    log_step "Downloading Node.js standalone binary"
+    mkdir -p "${SCRIPT_DIR}/.tools"
+    if curl -fsSL "${NODE_URL}" | tar -xJ --strip-components=1 -C "${SCRIPT_DIR}/.tools"; then
+        log_ok "Node.js downloaded to ${SCRIPT_DIR}/.tools"
+    else
+        log_warn "Node.js download failed — yt-dlp may not be able to solve JS challenges"
+    fi
 else
-    # Debug mode: keep C sources and emit verbose tracing.
-    NUITKA_ARGS+=("--show-modules")
-    NUITKA_ARGS+=("--show-scons")
-    log_warn "Build mode: DEBUG (C sources retained, --show-modules active)"
+    log_info "Node.js already present at ${SCRIPT_DIR}/.tools/bin/node"
 fi
 
 # ---------------------------------------------------------------------------
-# Step 4 — Write pre-build pass of build_manifest.json
+# Step 4 — Build the PyInstaller argument list
 # ---------------------------------------------------------------------------
-log_step "Step 4: Writing pre-build build_manifest.json"
+log_step "Step 4: Assembling PyInstaller command"
+
+PYINST_ARGS=(
+    # ---- Entry point --------------------------------------------------------
+    "${ENTRY_POINT}"
+
+    # ---- Naming & layout ----------------------------------------------------
+    "--name=${BINARY_NAME}"
+    "--onedir"
+    "--distpath=${OUTPUT_DIR}"
+    "--workpath=build"
+
+    # ---- Hidden imports -----------------------------------------------------
+    # These packages perform dynamic/runtime imports that PyInstaller's
+    # bytecode analysis cannot follow statically.
+    "--hidden-import=ytmusicapi"
+    "--hidden-import=grpc"
+    "--hidden-import=grpc._cython"
+    "--hidden-import=grpc._cython.cygrpc"
+    "--hidden-import=google.protobuf"
+    "--hidden-import=google.protobuf.internal"
+    "--hidden-import=yt_dlp"
+    "--hidden-import=yt_dlp.extractor"
+    "--hidden-import=yt_dlp.extractor.youtubetab"
+    "--hidden-import=yt_dlp.extractor.youtube"
+    "--hidden-import=requests"
+    "--hidden-import=certifi"
+    "--hidden-import=charset_normalizer"
+    "--hidden-import=idna"
+    "--hidden-import=urllib3"
+    "--hidden-import=generated"
+    "--hidden-import=handlers"
+
+    # ---- Collect full packages ----------------------------------------------
+    # Ensures every submodule and data file is pulled in for packages that
+    # discover resources at runtime.
+    "--collect-all=ytmusicapi"
+    "--collect-all=grpc"
+    "--collect-all=google.protobuf"
+    "--collect-all=yt_dlp"
+    "--collect-all=certifi"
+
+    # ---- Data files ---------------------------------------------------------
+    "--add-data=generated:generated"
+    "--add-data=certifi/cacert.pem:certifi"
+
+    # ---- Binaries -----------------------------------------------------------
+    # Node.js is required by yt-dlp to solve YouTube JS challenges.
+    "--add-binary=.tools/bin/node:."
+
+    # ---- Exclude unused large packages --------------------------------------
+    "--exclude-module=tkinter"
+    "--exclude-module=unittest"
+    "--exclude-module=test"
+    "--exclude-module=grpc_tools"
+    "--exclude-module=lib2to3"
+    "--exclude-module=pydoc"
+    "--exclude-module=doctest"
+
+    # ---- Non-interactive / clean build --------------------------------------
+    "--noconfirm"
+    "--clean"
+)
+
+if [[ "${DEBUG_BUILD}" -eq 1 ]]; then
+    PYINST_ARGS+=("--debug=all")
+    PYINST_ARGS+=("--console")
+    log_warn "Build mode: DEBUG (PyInstaller debug traces enabled)"
+else
+    log_info "Build mode: RELEASE"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 5 — Write pre-build pass of build_manifest.json
+# ---------------------------------------------------------------------------
+log_step "Step 5: Writing pre-build build_manifest.json"
 
 parse_req_version() {
     grep -iE "^${1}==" "${SCRIPT_DIR}/requirements.txt" | cut -d= -f3 || echo "unknown"
@@ -330,21 +249,11 @@ parse_req_version() {
 GRPCIO_VER="$(parse_req_version grpcio)"
 YTMUSICAPI_REQ_VER="$(parse_req_version ytmusicapi)"
 YTDLP_REQ_VER="$(parse_req_version yt-dlp)"
-PROTOBUF_VER="$("${PYTHON}" -c 'import google.protobuf; print(google.protobuf.__version__)' 2>/dev/null || echo "unknown")"
-
-# Serialise the NUITKA_ARGS array to a JSON array via Python.
-NUITKA_ARGS_JSON="$("${PYTHON}" -c "
-import json, sys
-args = $(printf '%s\n' "${NUITKA_ARGS[@]}" | python3 -c "
-import sys, json
-print(json.dumps([l.strip() for l in sys.stdin.read().splitlines() if l.strip()]))
-")
-print(json.dumps(args, indent=4))
-")"
+PROTOBUF_VER=$("${PYTHON}" -c 'import google.protobuf; print(google.protobuf.__version__)' 2>/dev/null || echo "unknown")
 
 cat > "${BUILD_MANIFEST}" <<MANIFEST
 {
-  "_schema_version": "1.0",
+  "_schema_version": "1.1",
   "_comment": "Build configuration tracker for gozik-yt-music. Auto-updated by package.sh.",
   "build_timestamp": "${BUILD_TIMESTAMP}",
   "git_commit": "${GIT_COMMIT}",
@@ -360,44 +269,35 @@ cat > "${BUILD_MANIFEST}" <<MANIFEST
   },
   "binary": {
     "name": "${BINARY_NAME}",
-    "output_path": "dist/${BINARY_NAME}",
-    "format": "onefile-elf-zstd",
+    "output_path": "dist/${BINARY_NAME}/${BINARY_NAME}",
+    "output_directory": "dist/${BINARY_NAME}",
+    "format": "pyinstaller-onedir",
     "platform": "linux-x86_64",
-    "extraction_spec": "{CACHE_DIR}/gozik/ytmusic-server/{VERSION}",
-    "extraction_note": "Payload extracted to XDG_CACHE_HOME on first launch; subsequent runs skip extraction (keyed by content hash)."
+    "note": "Self-contained directory produced by PyInstaller. Bundles the Python interpreter, bytecode, extension modules, and data files without translating Python to C."
   },
   "toolchain": {
     "python_version": "${PY_VERSION}",
-    "nuitka_version": "${NUITKA_VER_SHORT}",
-    "gcc_version": "${GCC_VER}",
-    "patchelf_version": "$(patchelf --version 2>&1 | head -1)",
-    "ccache_enabled": $([ "${USE_CCACHE}" -eq 1 ] && echo "true" || echo "false"),
-    "lto_enabled": $([ "${DEBUG_BUILD}" -eq 0 ] && echo "true" || echo "false"),
+    "pyinstaller_version": "${PYINST_VER}",
     "parallel_jobs": ${JOBS}
   },
-  "nuitka_flags_explained": {
-    "--mode=onefile": "Nuitka 4.x unified mode flag. Implies standalone (all .so bundled) and compresses the output into a single zstd ELF.",
-    "--onefile-tempdir-spec": "Extraction root override; uses XDG_CACHE_HOME to avoid noexec /tmp mounts.",
-    "--remove-output": "Purges intermediate .build/ directory after assembly (release mode only).",
-    "--lto=yes": "Link-Time Optimisation across all compiled C translation units (release mode only).",
-    "--include-package=ytmusicapi": "Dynamic mixin loading — static import tracer misses submodules without explicit inclusion.",
-    "--include-package=grpc / grpc._cython": "gRPC uses __import__ strings at runtime; Cython extension must be explicitly pulled in.",
-    "--include-package=google.protobuf / google.protobuf.internal": "protobuf 4+ C-extension fast path + pure-Python fallback; internal namespace requires explicit entry.",
-    "--include-package=yt_dlp / yt_dlp.extractor": "1100+ submodules loaded via plugin discovery strings; partial inclusion causes runtime ImportError.",
-    "--include-data-files=certifi/cacert.pem": "certifi.where() must resolve inside the extraction root; required for HTTPS.",
-    "--include-data-dir=generated": "protobuf Python stubs; package namespace anchor must be present post-extraction.",
-    "--nofollow-import-to=...": "Excludes GUI toolkit, test frameworks, and build-time tools; saves ~40 MB payload.",
-    "--python-flag=no_site": "Prevents system site-packages from shadowing bundled dependencies on startup.",
-    "--enable-plugin=anti-bloat": "Strips Jupyter kernels, test harnesses — reduces binary size 15-30%.",
-    "--assume-yes-for-downloads": "Suppresses CPython base-archive download prompts in non-interactive CI mode."
+  "pyinstaller_flags_explained": {
+    "--onedir": "Produces an application directory instead of a single file. Faster startup and easier debugging than --onefile.",
+    "--hidden-import=ytmusicapi / grpc / yt_dlp / google.protobuf": "Dynamic mixin loading and runtime __import__ strings cannot be detected by static analysis.",
+    "--collect-all=PACKAGE": "Recursively copies every submodule and package data file into the bundle.",
+    "--add-data=generated:generated": "Project protobuf stubs are included as a package directory.",
+    "--add-data=certifi/cacert.pem:certifi": "Mozilla CA bundle required for HTTPS by ytmusicapi and yt-dlp.",
+    "--exclude-module=...": "Excludes GUI toolkit, test frameworks, and build-time tools to reduce bundle size.",
+    "--noconfirm": "Suppresses interactive prompts, required for CI/automated builds.",
+    "--clean": "Removes PyInstaller's temporary build/ directory before building."
   },
   "pinned_dependencies": {
     "grpcio": "${GRPCIO_VER}",
     "grpcio-tools": "$(parse_req_version grpcio-tools)",
     "ytmusicapi": "${YTMUSICAPI_REQ_VER}",
-    "yt-dlp": "${YTDLP_REQ_VER}",
+    "yt-dlp": "${YTDLP_ACTUAL_VER}",
+    "yt-dlp_pinned_in_requirements": "${YTDLP_REQ_VER}",
     "protobuf_runtime": "${PROTOBUF_VER}",
-    "nuitka": "${NUITKA_VER_SHORT}"
+    "pyinstaller": "${PYINST_VER}"
   },
   "included_packages": [
     "ytmusicapi", "grpc", "grpc._cython",
@@ -407,7 +307,7 @@ cat > "${BUILD_MANIFEST}" <<MANIFEST
     "generated", "handlers"
   ],
   "excluded_packages": [
-    "tkinter", "unittest", "test", "distutils",
+    "tkinter", "unittest", "test",
     "grpc_tools", "lib2to3", "pydoc", "doctest"
   ],
   "data_files": [
@@ -423,16 +323,13 @@ cat > "${BUILD_MANIFEST}" <<MANIFEST
     }
   ],
   "build_requirements": {
-    "gcc": "11.0+ (tested: GCC 14.2.0)",
-    "patchelf": "0.14+ (tested: 0.18.0)",
-    "ccache": "optional (tested: 4.11.2)",
-    "python_shared": "libpython3.13.so must exist (Py_ENABLE_SHARED=1)",
-    "upx": "NOT used — UPX is incompatible with Nuitka onefile zstd payloads and triggers AV false positives",
-    "estimated_disk_build": "~2 GB (yt-dlp C compilation is I/O intensive)",
-    "estimated_binary_size": "~80-120 MB"
+    "python": "3.11+ (3.13 recommended)",
+    "upx": "NOT used — UPX triggers AV false positives and is unnecessary for onedir bundles",
+    "estimated_disk_build": "~500 MB",
+    "estimated_bundle_size": "~150-250 MB"
   },
   "post_build": {
-    "binary_size_bytes": null,
+    "bundle_size_bytes": null,
     "sha256": null,
     "build_duration_seconds": null,
     "note": "Populated by package.sh post-build pass."
@@ -443,66 +340,51 @@ MANIFEST
 log_ok "build_manifest.json written (pre-build)"
 
 # ---------------------------------------------------------------------------
-# Step 5 — Run the Nuitka compilation
+# Step 6 — Run the PyInstaller build
 # ---------------------------------------------------------------------------
-log_step "Step 5: Nuitka compilation"
+log_step "Step 6: PyInstaller build"
 log_info "Entry point : ${ENTRY_POINT}"
 log_info "Output dir  : ${OUTPUT_DIR}"
 log_info "Binary name : ${BINARY_NAME}"
 log_info "Build log   : ${BUILD_LOG}"
 echo ""
-log_info "Starting compilation — this typically takes 3–10 minutes …"
+log_info "Starting build — this typically takes 1–3 minutes ..."
 echo ""
 
 BUILD_START="$(date +%s)"
 
-# Run Nuitka from the project root so every path in the command line is
-# relative — this prevents absolute workspace paths from leaking into the
-# compiled binary.
+# Run PyInstaller from the project root so every path is relative.
 cd "${SCRIPT_DIR}"
-"${PYTHON}" -m nuitka \
-    "${NUITKA_ARGS[@]}" \
-    "${ENTRY_POINT}" \
-    2>&1 | tee "${BUILD_LOG}"
+"${PYINSTALLER}" "${PYINST_ARGS[@]}" 2>&1 | tee "${BUILD_LOG}"
 
 BUILD_END="$(date +%s)"
 BUILD_DURATION=$(( BUILD_END - BUILD_START ))
 
 # ---------------------------------------------------------------------------
-# Step 6 — Verify the binary was produced
+# Step 7 — Verify the bundle was produced
 # ---------------------------------------------------------------------------
-log_step "Step 6: Verifying binary"
-BINARY_PATH="${OUTPUT_DIR}/${BINARY_NAME}"
+log_step "Step 7: Verifying bundle"
+BUNDLE_DIR="${OUTPUT_DIR}/${BINARY_NAME}"
+BUNDLE_BINARY="${BUNDLE_DIR}/${BINARY_NAME}"
 
-if [[ ! -f "${BINARY_PATH}" ]]; then
-    log_error "Build FAILED — expected binary not found: ${BINARY_PATH}"
+if [[ ! -x "${BUNDLE_BINARY}" ]]; then
+    log_error "Build FAILED — expected binary not found: ${BUNDLE_BINARY}"
     log_error "Review the build log: ${BUILD_LOG}"
     exit 1
 fi
 
-log_ok "Binary produced: ${BINARY_PATH}"
+log_ok "Bundle produced: ${BUNDLE_DIR}"
 
-# ---------------------------------------------------------------------------
-# Step 7 — Post-processing: strip debug symbols
-# ---------------------------------------------------------------------------
-log_step "Step 7: Post-processing"
+# Make sure the binary is executable.
+chmod 0755 "${BUNDLE_BINARY}"
 
-log_info "Stripping debug symbols …"
-# strip has no effect on Nuitka's onefile ELF (symbols are not embedded in the
-# outer stub), but we run it defensively in case the format changes.
-strip --strip-unneeded "${BINARY_PATH}" 2>/dev/null \
-    && log_info "strip: done" \
-    || log_warn "strip: no effect (binary may already be stripped)"
+# Compute bundle size (entire directory).
+BUNDLE_SIZE_BYTES="$(du -sb "${BUNDLE_DIR}" | awk '{print $1}')"
+BUNDLE_SIZE_MB="$(awk "BEGIN {printf \"%.2f\", ${BUNDLE_SIZE_BYTES}/1048576}")"
+BUNDLE_SHA256=$(find "${BUNDLE_DIR}" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
 
-# Make executable (should already be set, but be explicit).
-chmod 0755 "${BINARY_PATH}"
-
-BINARY_SIZE="$(stat -c%s "${BINARY_PATH}" 2>/dev/null || stat -f%z "${BINARY_PATH}")"
-BINARY_SHA256="$(sha256sum "${BINARY_PATH}" | awk '{print $1}')"
-BINARY_SIZE_MB="$(awk "BEGIN {printf \"%.2f\", ${BINARY_SIZE}/1048576}")"
-
-log_ok "Size    : ${BINARY_SIZE_MB} MB  (${BINARY_SIZE} bytes)"
-log_ok "SHA-256 : ${BINARY_SHA256}"
+log_ok "Size    : ${BUNDLE_SIZE_MB} MB  (${BUNDLE_SIZE_BYTES} bytes)"
+log_ok "SHA-256 : ${BUNDLE_SHA256}"
 log_ok "Duration: ${BUILD_DURATION}s"
 
 # ---------------------------------------------------------------------------
@@ -514,8 +396,8 @@ log_step "Step 8: Updating build_manifest.json"
 import json, pathlib
 p = pathlib.Path('${BUILD_MANIFEST}')
 m = json.loads(p.read_text())
-m['post_build']['binary_size_bytes'] = ${BINARY_SIZE}
-m['post_build']['sha256'] = '${BINARY_SHA256}'
+m['post_build']['bundle_size_bytes'] = ${BUNDLE_SIZE_BYTES}
+m['post_build']['sha256'] = '${BUNDLE_SHA256}'
 m['post_build']['build_duration_seconds'] = ${BUILD_DURATION}
 p.write_text(json.dumps(m, indent=2))
 "
@@ -526,12 +408,12 @@ log_ok "build_manifest.json updated with post-build metadata"
 # ---------------------------------------------------------------------------
 log_step "Step 9: Smoke test"
 
-log_info "Running: ${BINARY_PATH} --help"
-if timeout 10 "${BINARY_PATH}" --help &>/dev/null; then
-    log_ok "Smoke test PASSED — binary launches and accepts --help"
+log_info "Running: ${BUNDLE_BINARY} --help"
+if timeout 10 "${BUNDLE_BINARY}" --help &>/dev/null; then
+    log_ok "Smoke test PASSED — bundle launches and accepts --help"
 else
     log_warn "Smoke test inconclusive (exit code non-zero or timed out)"
-    log_warn "Test manually: ${BINARY_PATH} --help"
+    log_warn "Test manually: ${BUNDLE_BINARY} --help"
 fi
 
 # ---------------------------------------------------------------------------
@@ -539,12 +421,13 @@ fi
 # ---------------------------------------------------------------------------
 log_step "Build complete"
 echo ""
-echo "  Binary  : ${BINARY_PATH}"
-echo "  Size    : ${BINARY_SIZE_MB} MB"
-echo "  SHA-256 : ${BINARY_SHA256}"
+echo "  Bundle  : ${BUNDLE_DIR}"
+echo "  Binary  : ${BUNDLE_BINARY}"
+echo "  Size    : ${BUNDLE_SIZE_MB} MB"
+echo "  SHA-256 : ${BUNDLE_SHA256}"
 echo "  Duration: ${BUILD_DURATION}s"
 echo "  Manifest: ${BUILD_MANIFEST}"
 echo "  Log     : ${BUILD_LOG}"
 echo ""
-log_info "To start the server:  ${BINARY_PATH} --port 50051"
-log_info "To run as a daemon :  ${BINARY_PATH} --port 50051 &"
+log_info "To start the server:  ${BUNDLE_BINARY} --port 50051"
+log_info "To install system-wide:  sudo make install"

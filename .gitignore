@@ -26,3 +26,14 @@ build/
 # Credential files (never commit; stored at ~/.config/gozik/)
 ytmusic_auth.json
 ytmusic_oauth.json
+.aider*
+
+# External tooling / bundled binaries
+.tools/
+certifi/
+
+# Build artifacts / stray files
+sys
+Building
+*.dist/
+*.onefile-build/

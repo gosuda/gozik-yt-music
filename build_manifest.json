@@ -1,6 +1,10 @@
 {
-  "_schema_version": "1.0",
-  "_comment": "Build configuration tracker for gozik-yt-music Nuitka packaging. Auto-updated by package.sh post-build.",
+  "_schema_version": "1.1",
+  "_comment": "Build configuration tracker for gozik-yt-music. Auto-updated by package.sh.",
+  "build_timestamp": "2026-06-10T15:28:39Z",
+  "git_commit": "9199f87",
+  "build_host": "elegant",
+  "build_os": "Linux 7.1.0-mountain-rc6+ x86_64",
   "project": {
     "name": "gozik-yt-music-server",
     "description": "YouTube Music gRPC plugin server for the gozik desktop player",
@@ -11,210 +15,83 @@
   },
   "binary": {
     "name": "gozik-yt-music-server",
-    "output_path": "dist/gozik-yt-music-server",
-    "format": "onefile-elf-zstd",
+    "output_path": "dist/gozik-yt-music-server/gozik-yt-music-server",
+    "output_directory": "dist/gozik-yt-music-server",
+    "format": "pyinstaller-onedir",
     "platform": "linux-x86_64",
-    "extraction_spec": "{CACHE_DIR}/gozik/ytmusic-server/{VERSION}",
-    "extraction_note": "Payload extracted to $XDG_CACHE_HOME on first launch. Subsequent launches reuse the cached tree (keyed by content hash)."
+    "note": "Self-contained directory produced by PyInstaller. Bundles the Python interpreter, bytecode, extension modules, and data files without translating Python to C."
   },
   "toolchain": {
     "python_version": "3.13.5",
-    "python_shared": true,
-    "nuitka_version": "4.1.2",
-    "gcc_version": "GCC 14.2.0 (Debian 14.2.0-19)",
-    "patchelf_version": "0.18.0",
-    "ccache_enabled": true,
-    "lto_enabled": true,
-    "parallel_jobs": "nproc (auto-detected at build time)"
+    "pyinstaller_version": "6.20.0",
+    "parallel_jobs": 12
   },
-  "nuitka_flags": {
-    "--mode=onefile": {
-      "rationale": "Nuitka 4.x unified mode. Implies standalone and compresses output into a single zstd ELF. Replaces legacy --onefile + --standalone dual-flag from Nuitka 1.x/2.x."
-    },
-    "--onefile-tempdir-spec={CACHE_DIR}/gozik/ytmusic-server/{VERSION}": {
-      "rationale": "Overrides default /tmp extraction to XDG_CACHE_HOME. {VERSION}=content hash prevents cross-version collisions. Avoids noexec /tmp failures."
-    },
-    "--remove-output": {
-      "rationale": "Purges intermediate .build/ after ELF assembly. Release mode only; omitted in --debug mode."
-    },
-    "--lto=yes": {
-      "rationale": "Link-Time Optimisation. Reduces binary size ~5%, enables cross-TU inlining. Adds ~30% compile time. Release mode only."
-    },
-    "--include-package=ytmusicapi": {
-      "rationale": "Dynamic mixin loading and importlib.resources; static tracer misses auth.oauth, mixins.*, models.*."
-    },
-    "--include-package=grpc": {
-      "rationale": "56 submodules discovered via __import__ strings at runtime. Explicit inclusion required."
-    },
-    "--include-package=grpc._cython": {
-      "rationale": "Cython extension (_cygrpc.so) is referenced only at runtime; belt-and-suspenders for the namespace."
-    },
-    "--include-package=google.protobuf": {
-      "rationale": "protobuf 4+ C-extension fast path + pure-Python fallback; google namespace needs __init__ shims."
-    },
-    "--include-package=google.protobuf.internal": {
-      "rationale": "Internal namespace skipped by static analysis; serialiser reflection references it heavily."
-    },
-    "--include-package=yt_dlp": {
-      "rationale": "1100+ submodules via plugin discovery strings. Partial inclusion causes runtime ImportError."
-    },
-    "--include-package=yt_dlp.extractor": {
-      "rationale": "Belt-and-suspenders for the largest dynamically-loaded yt-dlp subpackage."
-    },
-    "--include-package=requests,certifi,charset_normalizer,idna,urllib3": {
-      "rationale": "ytmusicapi HTTP stack. Explicit inclusion guards against namespace-package detection failures."
-    },
-    "--include-package=generated,handlers": {
-      "rationale": "Project-local packages not discoverable as installed packages."
-    },
-    "--include-package-data=ytmusicapi,grpc": {
-      "rationale": "Package-internal data files (schema JSON, locale data) from wheels."
-    },
-    "--include-data-files=certifi/cacert.pem": {
-      "rationale": "certifi.where() must resolve inside the extraction root. Required for all HTTPS connections."
-    },
-    "--include-data-dir=generated": {
-      "rationale": "Protobuf stub files; __init__.py namespace anchor must be present post-extraction."
-    },
-    "--nofollow-import-to=tkinter,unittest,test,distutils,grpc_tools,lib2to3,pydoc,doctest": {
-      "rationale": "All confirmed unused at server runtime. Exclusion saves ~40 MB payload."
-    },
-    "--python-flag=no_site": {
-      "rationale": "Prevents system site-packages from shadowing bundled deps on startup."
-    },
-    "--python-flag=no_warnings": {
-      "rationale": "Suppresses DeprecationWarning from protobuf/grpc internals in production binary."
-    },
-    "--enable-plugins=anti-bloat": {
-      "rationale": "Strips Jupyter kernels, test harnesses. Reduces binary 15-30%.",
-      "api_note": "Nuitka 4.x uses --enable-plugins= (plural); earlier series used --enable-plugin= (singular)."
-    },
-    "--assume-yes-for-downloads": {
-      "rationale": "Suppresses CPython base-archive download prompt for CI runners.",
-      "api_note": "Nuitka 4.x uses --assume-yes-for-downloads (plural); earlier used --assume-yes-for-download (singular)."
-    },
-    "--jobs=nproc": {
-      "rationale": "Parallelises C compilation across all available cores."
-    }
+  "pyinstaller_flags_explained": {
+    "--onedir": "Produces an application directory instead of a single file. Faster startup and easier debugging than --onefile.",
+    "--hidden-import=ytmusicapi / grpc / yt_dlp / google.protobuf": "Dynamic mixin loading and runtime __import__ strings cannot be detected by static analysis.",
+    "--collect-all=PACKAGE": "Recursively copies every submodule and package data file into the bundle.",
+    "--add-data=generated:generated": "Project protobuf stubs are included as a package directory.",
+    "--add-data=certifi/cacert.pem:certifi": "Mozilla CA bundle required for HTTPS by ytmusicapi and yt-dlp.",
+    "--exclude-module=...": "Excludes GUI toolkit, test frameworks, and build-time tools to reduce bundle size.",
+    "--noconfirm": "Suppresses interactive prompts, required for CI/automated builds.",
+    "--clean": "Removes PyInstaller's temporary build/ directory before building."
   },
-  "included_packages": [
-    {
-      "name": "ytmusicapi",
-      "installed_version": "1.12.0",
-      "has_native_ext": false
-    },
-    {
-      "name": "grpc",
-      "installed_version": "1.81.0",
-      "has_native_ext": true,
-      "native_ext": "_cython/cygrpc.cpython-313-x86_64-linux-gnu.so"
-    },
-    {
-      "name": "grpc._cython",
-      "installed_version": "1.81.0",
-      "has_native_ext": true
-    },
-    {
-      "name": "google.protobuf",
-      "installed_version": "6.33.6",
-      "has_native_ext": false
-    },
-    {
-      "name": "google.protobuf.internal",
-      "installed_version": "6.33.6",
-      "has_native_ext": false
-    },
-    {
-      "name": "yt_dlp",
-      "installed_version": "2026.03.17",
-      "has_native_ext": false,
-      "submodule_count": 1128
-    },
-    {
-      "name": "yt_dlp.extractor",
-      "installed_version": "2026.03.17",
-      "has_native_ext": false
-    },
-    {
-      "name": "requests",
-      "installed_version": "transitive",
-      "has_native_ext": false
-    },
-    {
-      "name": "certifi",
-      "installed_version": "transitive",
-      "has_native_ext": false
-    },
-    {
-      "name": "charset_normalizer",
-      "installed_version": "transitive",
-      "has_native_ext": false
-    },
-    {
-      "name": "idna",
-      "installed_version": "transitive",
-      "has_native_ext": false
-    },
-    {
-      "name": "urllib3",
-      "installed_version": "transitive",
-      "has_native_ext": false
-    },
-    {
-      "name": "generated",
-      "installed_version": "local",
-      "has_native_ext": false
-    },
-    {
-      "name": "handlers",
-      "installed_version": "local",
-      "has_native_ext": false
-    }
-  ],
-  "excluded_packages": {
-    "tkinter": "GUI toolkit \u2014 headless gRPC server never renders a GUI",
-    "unittest": "Test framework \u2014 not needed at runtime",
-    "test": "CPython internal test suite",
-    "distutils": "Build infrastructure \u2014 irrelevant at runtime",
-    "grpc_tools": "Build-time proto compiler \u2014 must not ship in runtime binary",
-    "lib2to3": "Python 2 migration tool",
-    "pydoc": "Documentation generator",
-    "doctest": "Test framework"
-  },
-  "data_files": [
-    {
-      "source": "/workspace/gozik-yt-music/.venv/lib/python3.13/site-packages/certifi/cacert.pem",
-      "destination": "certifi/cacert.pem",
-      "size_bytes": 236095,
-      "description": "Mozilla CA certificate bundle (PEM); required for HTTPS by ytmusicapi and yt-dlp"
-    },
-    {
-      "source": "generated/",
-      "destination": "generated/",
-      "description": "Compiled protobuf Python stubs for music_provider and provider_link services"
-    }
-  ],
   "pinned_dependencies": {
     "grpcio": "1.81.0",
     "grpcio-tools": "1.81.0",
     "ytmusicapi": "1.10.2",
-    "yt-dlp": "2025.1.26",
+    "yt-dlp": "2026.06.09.230517",
+    "yt-dlp_pinned_in_requirements": "2025.1.26",
     "protobuf_runtime": "6.33.6",
-    "nuitka": "4.1.2"
+    "pyinstaller": "6.20.0"
   },
+  "included_packages": [
+    "ytmusicapi",
+    "grpc",
+    "grpc._cython",
+    "google.protobuf",
+    "google.protobuf.internal",
+    "yt_dlp",
+    "yt_dlp.extractor",
+    "requests",
+    "certifi",
+    "charset_normalizer",
+    "idna",
+    "urllib3",
+    "generated",
+    "handlers"
+  ],
+  "excluded_packages": [
+    "tkinter",
+    "unittest",
+    "test",
+    "grpc_tools",
+    "lib2to3",
+    "pydoc",
+    "doctest"
+  ],
+  "data_files": [
+    {
+      "source": "/workspace/gozik-yt-music/.venv/lib/python3.13/site-packages/certifi/cacert.pem",
+      "destination": "certifi/cacert.pem",
+      "description": "Mozilla CA certificate bundle; required for HTTPS by ytmusicapi and yt-dlp"
+    },
+    {
+      "source": "generated/",
+      "destination": "generated/",
+      "description": "Compiled protobuf stubs for music_provider and provider_link services"
+    }
+  ],
   "build_requirements": {
-    "gcc": "11.0+ (tested: GCC 14.2.0)",
-    "patchelf": "0.14+ (tested: 0.18.0); required for RPATH rewriting in onefile ELF on Linux",
-    "ccache": "optional (tested: 4.11.2); auto-detected by Nuitka when on PATH",
-    "upx": "NOT used \u2014 incompatible with Nuitka onefile zstd payloads and triggers AV false positives",
-    "libpython_shared": "libpython3.13.so must exist (Py_ENABLE_SHARED=1)",
-    "disk_build": "~2 GB (yt-dlp 1128-module C compilation is I/O intensive)",
-    "disk_output": "~80-120 MB (estimated onefile ELF)"
+    "python": "3.11+ (3.13 recommended)",
+    "upx": "NOT used \u2014 UPX triggers AV false positives and is unnecessary for onedir bundles",
+    "estimated_disk_build": "~500 MB",
+    "estimated_bundle_size": "~150-250 MB"
   },
   "post_build": {
-    "binary_size_bytes": null,
-    "sha256": null,
-    "build_duration_seconds": null,
-    "note": "Populated by package.sh after a successful build."
+    "bundle_size_bytes": 83489169,
+    "sha256": "948a49cc222e74c691d6d0250792f070113eb0ad6d9e19658b1ac8978ece48c3",
+    "build_duration_seconds": 15,
+    "note": "Populated by package.sh post-build pass."
   }
 }

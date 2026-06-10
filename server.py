@@ -153,6 +153,12 @@ def serve(
     server.start()
     logger.info("gRPC server listening on %s", bind_address)
 
+    # Start the GUI informational window in a background thread.
+    if webui_port > 0:
+        import threading
+        gui_thread = threading.Thread(target=_show_gui_popup, args=(webui_port,), daemon=True)
+        gui_thread.start()
+
     # ---------------------------------------------------------------------------
     # Graceful shutdown handler — triggered by SIGTERM or SIGINT (Ctrl-C).
     # ---------------------------------------------------------------------------
@@ -179,6 +185,116 @@ def serve(
             time.sleep(1)
     finally:
         logger.info("Server shutdown complete")
+
+
+def _show_gui_popup(webui_port: int) -> None:
+    """Show a simple tkinter GUI window to inform the user that the plugin is running,
+    provide a button to open the web console, and warn them to close their browser first
+    if they use the Auto Import feature."""
+    # Skip when running as a PyInstaller bundle (tkinter is excluded at build time)
+    # or without a graphical display. systemd user services CAN show GUI as long as
+    # DISPLAY / WAYLAND_DISPLAY is present (set via PassEnvironment or
+    # systemctl --user import-environment).
+    if getattr(sys, "frozen", False):
+        return
+    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        return
+
+    try:
+        import tkinter as tk
+        import webbrowser
+        
+        root = tk.Tk()
+        root.title("gozik YouTube Music")
+        
+        # Center the window on screen
+        window_width = 450
+        window_height = 240
+        screen_width = root.winfo_screenwidth()
+        screen_height = root.winfo_screenheight()
+        pos_x = int((screen_width - window_width) / 2)
+        pos_y = int((screen_height - window_height) / 2)
+        root.geometry(f"{window_width}x{window_height}+{pos_x}+{pos_y}")
+        root.resizable(False, False)
+        root.configure(bg="#0f0f0f")
+        
+        # Title label
+        title_lbl = tk.Label(
+            root,
+            text="🎵 gozik YouTube Music Plugin",
+            font=("Arial", 14, "bold"),
+            fg="#ff0033",
+            bg="#0f0f0f"
+        )
+        title_lbl.pack(pady=15)
+        
+        # Description
+        info_lbl = tk.Label(
+            root,
+            text=f"The plugin server is running on port {webui_port}.\nYou can manage authentication via the Web UI.",
+            font=("Arial", 10),
+            fg="#e8e8e8",
+            bg="#0f0f0f",
+            justify="center"
+        )
+        info_lbl.pack(pady=5)
+        
+        # Critical warning/note for browser lock
+        warn_lbl = tk.Label(
+            root,
+            text="⚠️ IMPORTANT: If you use 'Auto Import from Browser',\nplease CLOSE the browser first to prevent database lock errors.",
+            font=("Arial", 9, "bold"),
+            fg="#ffb300",
+            bg="#0f0f0f",
+            justify="center"
+        )
+        warn_lbl.pack(pady=10)
+        
+        # Buttons
+        btn_frame = tk.Frame(root, bg="#0f0f0f")
+        btn_frame.pack(pady=10)
+        
+        def open_url():
+            webbrowser.open(f"http://127.0.0.1:{webui_port}")
+            
+        open_btn = tk.Button(
+            btn_frame,
+            text="Open Web UI",
+            command=open_url,
+            font=("Arial", 9, "bold"),
+            fg="#ffffff",
+            bg="#ff0033",
+            activebackground="#cc0029",
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=12,
+            pady=4
+        )
+        open_btn.pack(side=tk.LEFT, padx=10)
+        
+        close_btn = tk.Button(
+            btn_frame,
+            text="Dismiss",
+            command=root.destroy,
+            font=("Arial", 9),
+            fg="#ffffff",
+            bg="#333333",
+            activebackground="#444444",
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=12,
+            pady=4
+        )
+        close_btn.pack(side=tk.LEFT, padx=10)
+        
+        # Lift window to top once
+        root.attributes("-topmost", True)
+        root.update()
+        root.attributes("-topmost", False)
+        
+        root.mainloop()
+    except Exception as exc:
+        logger.warning("Failed to start Tkinter GUI popup: %s", exc)
 
 
 def main() -> None:

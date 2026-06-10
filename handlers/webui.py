@@ -156,6 +156,8 @@ def make_handler(servicer: Any):
                 self._login_complete()
             elif path == "/login/cookie":
                 self._login_cookie()
+            elif path == "/login/extract":
+                self._login_extract()
             elif path == "/logout":
                 self._logout()
             else:
@@ -206,7 +208,29 @@ def make_handler(servicer: Any):
         def _login_page(self) -> None:
             html = '''
 <div class="card">
-  <h2>YouTube Music Login</h2>
+  <h2>Auto Import from Browser</h2>
+  <p style="font-size:.9rem;color:var(--muted)">
+    Extract session cookies directly from your local browser's database.
+    <strong>Please close the selected browser first</strong> to prevent database lock errors.
+  </p>
+  <label class="label">Select Browser</label>
+  <div class="row">
+    <select id="browserSelect" style="background:#111;border:1px solid var(--border);color:var(--text);padding:.5rem;border-radius:8px;outline:none;">
+      <option value="chrome">Chrome</option>
+      <option value="firefox">Firefox</option>
+      <option value="edge">Edge</option>
+      <option value="brave">Brave</option>
+      <option value="opera">Opera</option>
+      <option value="vivaldi">Vivaldi</option>
+      <option value="safari">Safari (macOS)</option>
+      <option value="whale">Whale</option>
+    </select>
+    <button onclick="importFromBrowser()">Import & Authenticate</button>
+  </div>
+  <div id="importResult" style="margin-top:.75rem"></div>
+</div>
+<div class="card">
+  <h2>YouTube Music Login (Selenium)</h2>
   <p style="font-size:.9rem;color:var(--muted)">
     Click <strong>Start</strong> to open a real browser window.
     Log in to your Google account on YouTube Music — the server will
@@ -233,14 +257,31 @@ def make_handler(servicer: Any):
 </div>
 <script>
 let deviceCode = "";
+async function importFromBrowser(){
+  const browser = document.getElementById("browserSelect").value;
+  const box = document.getElementById("importResult");
+  box.innerHTML = 'Extracting and authenticating...';
+  const res = await post("/login/extract",{browser:browser});
+  if(res.error){ box.innerHTML = '<span style="color:var(--accent)">Error: '+res.error+'</span>'; return; }
+  box.innerHTML = '<span style="color:var(--accent2)">Authenticated successfully!</span>';
+  setTimeout(()=>location.href="/",1200);
+}
 async function startOAuth(){
   const res = await post("/login/initiate",{});
   const box = document.getElementById("oauthResult");
+  const btn = document.getElementById("completeBtn");
   if(res.error){ box.innerHTML = '<span style="color:var(--accent)">Error: '+res.error+'</span>'; return; }
+  if(res.already_authenticated){
+    box.innerHTML = '<p><strong style="color:var(--accent2)">Auth Complete!</strong></p>';
+    btn.disabled = false;
+    btn.textContent = "Close";
+    btn.onclick = () => location.href="/";
+    return;
+  }
   box.innerHTML = '<p><strong style="color:var(--accent2)">Browser window opened.</strong></p>'+
     '<p>A Chromium window was launched for YouTube Music.</p>'+
     '<p>Please log in inside <strong>that</strong> window. The server will detect it automatically.</p>';
-  document.getElementById("completeBtn").disabled = false;
+  btn.disabled = false;
   pollStatus();
 }
 async function pollStatus(){
@@ -307,11 +348,22 @@ async function saveCookie(){
         def _login_initiate(self) -> None:
             try:
                 resp = servicer.InitiateAuth(pb.InitiateAuthRequest(), _FakeContext())
+                already_done = False
+                try:
+                    with servicer._lock:
+                        already_done = bool(servicer._selenium_result.get("success"))
+                except Exception:
+                    pass
                 self._json({
                     "auth_url": resp.auth_url,
                     "device_code": resp.device_code,
-                    "opened_browser": True,
-                    "message": "A browser window has been opened. Please log in to YouTube Music in that window.",
+                    "opened_browser": not already_done,
+                    "already_authenticated": already_done,
+                    "message": (
+                        "A browser window has been opened. Please log in to YouTube Music in that window."
+                        if not already_done
+                        else "Authenticated using existing browser session."
+                    ),
                 })
             except Exception as exc:
                 logger.error("InitiateAuth via web UI failed: %s", exc)
@@ -351,6 +403,26 @@ async function saveCookie(){
                 })
             except Exception as exc:
                 logger.error("CompleteAuth(cookie) via web UI failed: %s", exc)
+                self._json({"error": str(exc)}, 500)
+
+        def _login_extract(self) -> None:
+            data = self._read_json()
+            browser = data.get("browser", "")
+            user_agent = self.headers.get("User-Agent", "")
+            try:
+                req = pb.CompleteAuthRequest(params={"browser": browser, "user_agent": user_agent})
+                resp = servicer.CompleteAuth(req, _FakeContext())
+                try:
+                    from handlers.desktop_entry import register
+                    register(webui_port=server.server_address[1], force=False)
+                except Exception:
+                    pass
+                self._json({
+                    "access_token": resp.access_token,
+                    "expires_at": resp.expires_at,
+                })
+            except Exception as exc:
+                logger.error("CompleteAuth(extract) via web UI failed: %s", exc)
                 self._json({"error": str(exc)}, 500)
 
         def _logout(self) -> None:

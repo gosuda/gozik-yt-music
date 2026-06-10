@@ -4,6 +4,22 @@ handlers/provider.py — MusicProviderService gRPC servicer implementation.
 Maps every RPC defined in music_provider.proto to concrete ytmusicapi calls.
 Authentication credentials are stored in the host OS standard configuration
 directory: ~/.config/gozik/ytmusic_auth.json
+
+Authentication Architecture (three-tier fallback):
+    1. OAuth 2.0 (primary)
+       - Uses ytmusicapi's built-in OAuthCredentials / device-code flow.
+       - Tokens persisted to _OAUTH_FILE as JSON (includes client_id/client_secret).
+       - Client credentials are read from environment variables
+         GOZIK_YTM_OAUTH_CLIENT_ID and GOZIK_YTM_OAUTH_CLIENT_SECRET.
+    2. Browser cookie fallback (secondary)
+       - Interactive Selenium login when OAuth is unavailable.
+       - Cookies and User-Agent are persisted to _AUTH_FILE as JSON headers.
+       - Streaming uses a temporary Netscape-format cookiefile; never
+         cookiesfrombrowser.
+    3. Unauthenticated public mode (last resort)
+       - Search, GetTrackDetails, and ResolveStream work without login.
+       - Personal-data RPCs (GetUserLibrary, GetUserPlaylists) return
+         UNAUTHENTICATED with an actionable remediation message.
 """
 
 from __future__ import annotations
@@ -13,6 +29,9 @@ import json
 import logging
 import os
 import platform
+import shutil
+import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -76,27 +95,70 @@ _CAPABILITIES = [
     pb.PROVIDER_CAPABILITY_LIBRARY_MANAGEMENT,
 ]
 
+# ---------------------------------------------------------------------------
+# Environment variable names for OAuth client credentials
+# ---------------------------------------------------------------------------
+_ENV_OAUTH_CLIENT_ID = "GOZIK_YTM_OAUTH_CLIENT_ID"
+_ENV_OAUTH_CLIENT_SECRET = "GOZIK_YTM_OAUTH_CLIENT_SECRET"
 
-def _load_auth_file() -> Optional[Dict[str, Any]]:
-    """Load the persisted browser auth JSON if it is structurally valid."""
+
+def _get_oauth_env_credentials() -> tuple[Optional[str], Optional[str]]:
+    """Return OAuth client credentials from environment variables, if set."""
+    client_id = os.environ.get(_ENV_OAUTH_CLIENT_ID, "").strip()
+    client_secret = os.environ.get(_ENV_OAUTH_CLIENT_SECRET, "").strip()
+    if client_id and client_secret:
+        return client_id, client_secret
+    return None, None
+
+
+# ---------------------------------------------------------------------------
+# Auth file helpers
+# ---------------------------------------------------------------------------
+
+def _load_json_file(path: Path) -> Optional[Dict[str, Any]]:
+    """Load a JSON dict from *path* if it exists and is valid."""
     try:
-        if not _AUTH_FILE.exists():
+        if not path.exists():
             return None
-        data = json.loads(_AUTH_FILE.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict) or not data:
             return None
         return data
     except (json.JSONDecodeError, OSError) as exc:
-        logger.warning("Failed to read auth file %s: %s", _AUTH_FILE, exc)
+        logger.warning("Failed to read JSON file %s: %s", path, exc)
         return None
 
 
-def _save_auth_file(data: Dict[str, Any]) -> None:
-    """Persist auth data to the config directory."""
-    _AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _AUTH_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    logger.info("Auth credentials saved to %s", _AUTH_FILE)
+def _save_json_file(path: Path, data: Dict[str, Any]) -> None:
+    """Persist *data* as indented JSON to *path*, creating parents if needed."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    logger.info("Saved auth credentials to %s", path)
 
+
+def _load_auth_file() -> Optional[Dict[str, Any]]:
+    """Load the persisted browser-cookie auth JSON if it is structurally valid."""
+    return _load_json_file(_AUTH_FILE)
+
+
+def _save_auth_file(data: Dict[str, Any]) -> None:
+    """Persist browser-cookie auth data to the config directory."""
+    _save_json_file(_AUTH_FILE, data)
+
+
+def _load_oauth_file() -> Optional[Dict[str, Any]]:
+    """Load the persisted OAuth token JSON if it is structurally valid."""
+    return _load_json_file(_OAUTH_FILE)
+
+
+def _save_oauth_file(data: Dict[str, Any]) -> None:
+    """Persist OAuth token data to the config directory."""
+    _save_json_file(_OAUTH_FILE, data)
+
+
+# ---------------------------------------------------------------------------
+# Browser name normalisation (auth-setup only — never used in streaming)
+# ---------------------------------------------------------------------------
 
 def _normalise_browser_name(value: str) -> Optional[str]:
     """Return a yt-dlp browser name, or None when the value is unsupported."""
@@ -125,6 +187,33 @@ def _browser_from_chrome_type(chrome_type: ChromeType) -> str:
     return "chrome"
 
 
+# ---------------------------------------------------------------------------
+# Cookie / header builders
+# ---------------------------------------------------------------------------
+
+def _generate_sapisid_auth(cookie_str: str) -> tuple[str, str]:
+    """Generate a SAPISIDHASH authorization header from browser cookies."""
+    cookie_dict: Dict[str, str] = {}
+    for part in cookie_str.split(";"):
+        if "=" in part:
+            key, value = part.strip().split("=", 1)
+            cookie_dict[key] = value
+
+    sapisid = cookie_dict.get("SAPISID") or cookie_dict.get("__Secure-3PAPISID")
+    if not sapisid:
+        raise RuntimeError(
+            "SAPISID cookie not found — are you logged in? "
+            "How to fix: complete the browser login flow and ensure you are signed in to YouTube Music. "
+            "Fallback: public search is still available without login."
+        )
+
+    origin = "https://music.youtube.com"
+    timestamp = int(time.time())
+    message = f"{timestamp} {sapisid} {origin}"
+    sha1 = hashlib.sha1(message.encode()).hexdigest()
+    return f"SAPISIDHASH {timestamp}_{sha1}", "0"
+
+
 def _build_cookie_auth_headers(
     cookie_str: str,
     user_agent: str,
@@ -151,31 +240,59 @@ def _build_cookie_auth_headers(
     return headers
 
 
-def _build_ytmusic(auth_data: Optional[Dict[str, Any]] = None) -> ytmusicapi.YTMusic:
-    """Construct a YTMusic instance from OAuth, browser-cookie auth, or public mode."""
-    if _OAUTH_FILE.exists():
-        logger.debug("Initialising YTMusic with OAuth credentials from %s", _OAUTH_FILE)
-        return ytmusicapi.YTMusic(str(_OAUTH_FILE))
+# ---------------------------------------------------------------------------
+# YTMusic client builder (OAuth → browser cookie → unauthenticated)
+# ---------------------------------------------------------------------------
 
-    if _AUTH_FILE.exists():
-        logger.debug("Initialising YTMusic with browser auth from %s", _AUTH_FILE)
-        try:
-            return ytmusicapi.YTMusic(str(_AUTH_FILE))
-        except Exception as exc:  # noqa: BLE001
+def _build_ytmusic() -> ytmusicapi.YTMusic:
+    """Construct a YTMusic instance from OAuth, browser-cookie auth, or public mode."""
+    oauth_data = _load_oauth_file()
+    if oauth_data:
+        client_id = oauth_data.get("client_id")
+        client_secret = oauth_data.get("client_secret")
+        if client_id and client_secret:
+            try:
+                oauth_creds = ytmusicapi.OAuthCredentials(
+                    client_id=client_id,
+                    client_secret=client_secret,
+                )
+                logger.debug("Initializing YTMusic with OAuth credentials from %s", _OAUTH_FILE)
+                return ytmusicapi.YTMusic(str(_OAUTH_FILE), oauth_credentials=oauth_creds)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to initialize YTMusic with OAuth (%s). "
+                    "Falling back to browser cookie auth.",
+                    exc,
+                )
+        else:
             logger.warning(
-                "Failed to load auth from %s: %s — falling back to unauthenticated",
-                _AUTH_FILE,
+                "OAuth file %s is missing client_id/client_secret. "
+                "Re-authenticate with OAuth or use browser cookie fallback.",
+                _OAUTH_FILE,
+            )
+
+    auth_data = _load_auth_file()
+    if auth_data:
+        try:
+            logger.debug("Initializing YTMusic with browser auth from %s", _AUTH_FILE)
+            return ytmusicapi.YTMusic(str(_AUTH_FILE))
+        except Exception as exc:
+            logger.warning(
+                "Failed to initialize YTMusic with browser auth (%s). "
+                "Falling back to unauthenticated public mode.",
                 exc,
             )
 
-    logger.info("Initialising unauthenticated YTMusic client")
+    logger.info("Initializing unauthenticated YTMusic client")
     return ytmusicapi.YTMusic()
 
 
+# ---------------------------------------------------------------------------
+# Chrome binary detection
+# ---------------------------------------------------------------------------
+
 def _find_chrome_binary() -> tuple[str, ChromeType]:
     """Locate a Chrome, Chromium, or Edge binary."""
-    import shutil
-
     candidates: list[tuple[str, ChromeType]] = [
         ("chromium", ChromeType.CHROMIUM),
         ("chromium-browser", ChromeType.CHROMIUM),
@@ -228,28 +345,14 @@ def _find_chrome_binary() -> tuple[str, ChromeType]:
 
     raise RuntimeError(
         "No Chrome, Chromium, or Edge browser found. "
-        "Please install a supported browser and ensure it is in your PATH."
+        "Please install a supported browser and ensure it is in your PATH. "
+        "Fallback: public search is still available without login."
     )
 
 
-def _generate_sapisid_auth(cookie_str: str) -> tuple[str, str]:
-    """Generate a SAPISIDHASH authorization header from browser cookies."""
-    cookie_dict: Dict[str, str] = {}
-    for part in cookie_str.split(";"):
-        if "=" in part:
-            key, value = part.strip().split("=", 1)
-            cookie_dict[key] = value
-
-    sapisid = cookie_dict.get("SAPISID") or cookie_dict.get("__Secure-3PAPISID")
-    if not sapisid:
-        raise RuntimeError("SAPISID cookie not found — are you logged in?")
-
-    origin = "https://music.youtube.com"
-    timestamp = int(time.time())
-    message = f"{timestamp} {sapisid} {origin}"
-    sha1 = hashlib.sha1(message.encode()).hexdigest()
-    return f"SAPISIDHASH {timestamp}_{sha1}", "0"
-
+# ---------------------------------------------------------------------------
+# Selenium interactive auth thread
+# ---------------------------------------------------------------------------
 
 def _selenium_auth_thread(result: Dict[str, Any]) -> None:
     """Open a browser, wait for login, and persist ytmusicapi auth headers."""
@@ -304,7 +407,7 @@ def _selenium_auth_thread(result: Dict[str, Any]) -> None:
 
         result["success"] = True
         logger.info("Selenium auth succeeded — credentials saved to %s", _AUTH_FILE)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.error("Selenium auth failed: %s", exc, exc_info=True)
         result["error"] = str(exc)
         result.pop("pending", None)
@@ -318,12 +421,197 @@ def _selenium_auth_thread(result: Dict[str, Any]) -> None:
                 pass
 
 
+# ---------------------------------------------------------------------------
+# Auth status
+# ---------------------------------------------------------------------------
+
 def _auth_status() -> int:
     """Return the current provider authentication state."""
     if _OAUTH_FILE.exists() or _load_auth_file() is not None:
         return pb.AUTH_STATUS_AUTHENTICATED
     return pb.AUTH_STATUS_UNAUTHENTICATED
 
+
+# ---------------------------------------------------------------------------
+# JS runtime helper for yt-dlp
+# ---------------------------------------------------------------------------
+
+def _get_node_path() -> Optional[str]:
+    """Return the path to a Node.js binary for yt-dlp JS challenges.
+
+    Search order:
+        1. Bundled PyInstaller onedir (same dir as the executable).
+        2. Project-local .tools/bin/node.
+        3. Any node in the system PATH.
+    """
+    # 1. PyInstaller bundle
+    if getattr(sys, "frozen", False):
+        bundle_dir = Path(sys.executable).parent
+        bundled = bundle_dir / "node"
+        if bundled.exists() and os.access(bundled, os.X_OK):
+            return str(bundled)
+
+    # 2. Local download (dev / build prep)
+    local_node = Path(__file__).resolve().parent.parent / ".tools" / "bin" / "node"
+    if local_node.exists() and os.access(local_node, os.X_OK):
+        return str(local_node)
+
+    # 3. System PATH
+    system_node = shutil.which("node")
+    if system_node:
+        return system_node
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Stream resolution (NO cookiesfrombrowser — uses stored cookie string only)
+# ---------------------------------------------------------------------------
+
+def _write_netscape_cookie_file(cookie_str: str) -> str:
+    """Write *cookie_str* to a temporary Netscape-format cookie file.
+
+    Returns the path to the temporary file. The caller is responsible for
+    deleting the file when done.
+    """
+    fd, path = tempfile.mkstemp(suffix=".txt")
+    with os.fdopen(fd, "w") as f:
+        f.write("# Netscape HTTP Cookie File\n")
+        f.write("# This file was generated by gozik-yt-music\n")
+        for part in cookie_str.split(";"):
+            part = part.strip()
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            # Netscape format: domain  flag  path  secure  expiry  name  value
+            f.write(
+                f".youtube.com\tTRUE\t/\tTRUE\t0\t{key.strip()}\t{value.strip()}\n"
+            )
+    return path
+
+
+def _resolve_stream_url(video_id: str, quality: int) -> tuple[str, dict[str, str], int]:
+    """Extract a direct audio stream URL for the given YouTube Music video ID.
+
+    Authentication fallback for yt-dlp:
+        1. Browser cookie string from _AUTH_FILE (written to a temporary
+           Netscape cookiefile and passed via yt-dlp's cookiefile option).
+        2. Stored User-Agent from _AUTH_FILE (passed via http_headers).
+        3. Unauthenticated if no cookies are stored.
+
+    Raises:
+        RuntimeError: with actionable remediation advice on every failure path.
+    """
+    try:
+        import yt_dlp
+    except ImportError as exc:
+        raise RuntimeError(
+            "What failed: yt-dlp is not installed. "
+            "How to fix: install dependencies via requirements.txt. "
+            "Fallback: public search is still available without streaming."
+        ) from exc
+
+    format_selector = _QUALITY_FORMAT.get(quality, "bestaudio")
+    ydl_opts: Dict[str, Any] = {
+        "format": format_selector,
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "skip_download": True,
+        "extract_flat": False,
+    }
+
+    node_path = _get_node_path()
+    if node_path:
+        ydl_opts["js_runtimes"] = {"node": {"path": node_path}}
+        ydl_opts["remote_components"] = {"ejs:github"}
+
+    cookie_path: Optional[str] = None
+    auth_data = _load_auth_file()
+
+    try:
+        if auth_data:
+            cookie_str = auth_data.get("cookie", "")
+            if cookie_str:
+                try:
+                    cookie_path = _write_netscape_cookie_file(cookie_str)
+                    ydl_opts["cookiefile"] = cookie_path
+                    logger.debug("Using stored browser cookie file for streaming")
+                except OSError as exc:
+                    logger.warning("Failed to write temporary cookie file: %s", exc)
+            else:
+                logger.debug("No cookie string found in auth file")
+
+            user_agent = auth_data.get("user-agent", "")
+            if user_agent:
+                ydl_opts["http_headers"] = {"User-Agent": user_agent}
+                logger.debug("Using stored User-Agent for streaming")
+
+        url = f"https://music.youtube.com/watch?v={video_id}"
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except yt_dlp.utils.DownloadError as exc:
+            error_msg = str(exc).lower()
+            if "sign in to confirm" in error_msg or "bot" in error_msg:
+                raise RuntimeError(
+                    "What failed: YouTube bot detection triggered. "
+                    "How to fix: re-authenticate in Settings using browser cookie "
+                    "or OAuth authentication. "
+                    "Fallback: public search is still available without login."
+                ) from exc
+            elif "unavailable" in error_msg or "private" in error_msg:
+                raise RuntimeError(
+                    f"What failed: this track is unavailable or private ({video_id}). "
+                    "How to fix: try a different track. "
+                    "Fallback: public search is still available."
+                ) from exc
+            else:
+                raise RuntimeError(
+                    "What failed: stream extraction failed. "
+                    "How to fix: update yt-dlp: `pip install -U yt-dlp` or "
+                    "`yt-dlp -U --update-to nightly`. "
+                    "Fallback: public search is still available without streaming."
+                ) from exc
+
+        if info is None:
+            raise RuntimeError(
+                "What failed: yt-dlp returned no stream info. "
+                "How to fix: update yt-dlp: `pip install -U yt-dlp` or "
+                "`yt-dlp -U --update-to nightly`. "
+                "Fallback: public search is still available without streaming."
+            )
+
+        stream_url: str = info.get("url", "")
+        if not stream_url:
+            formats = info.get("formats", [])
+            if formats:
+                stream_url = formats[-1].get("url", "")
+
+        if not stream_url:
+            raise RuntimeError(
+                "What failed: no stream URL found. "
+                "How to fix: this track may be region-restricted or require authentication. "
+                "Try re-authenticating in Settings or using a different track. "
+                "Fallback: public search is still available without streaming."
+            )
+
+        http_headers: dict[str, str] = info.get("http_headers", {})
+        headers = {key: str(value) for key, value in http_headers.items()}
+        expiry_ms = int((time.time() + 6 * 3600) * 1000)
+
+        return stream_url, headers, expiry_ms
+    finally:
+        if cookie_path and os.path.exists(cookie_path):
+            try:
+                os.unlink(cookie_path)
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Protobuf helpers
+# ---------------------------------------------------------------------------
 
 def _to_pb_image(thumb: Dict[str, Any]) -> pb.Image:
     """Convert a ytmusicapi thumbnail dict to a protobuf Image message."""
@@ -387,10 +675,13 @@ def _duration_to_ms(duration_str: Optional[str]) -> int:
 
 
 def _ytm_track_to_pb(result: Dict[str, Any]) -> pb.Track:
-    """Convert a ytmusicapi song or video result to a protobuf Track."""
+    """Convert a ytmusicapi song, video, or episode result to a protobuf Track."""
     video_id = result.get("videoId") or ""
     title = result.get("title") or ""
     artists = [_to_pb_artist(a) for a in (result.get("artists") or [])]
+    # Episode results use "podcast" instead of "artists"
+    if not artists and isinstance(result.get("podcast"), dict):
+        artists = [_to_pb_artist(result["podcast"])]
     album_raw = result.get("album")
     album = _to_pb_album(album_raw) if isinstance(album_raw, dict) else pb.Album()
     duration_ms = _duration_to_ms(result.get("duration"))
@@ -425,7 +716,7 @@ def _ytm_album_to_pb(result: Dict[str, Any]) -> pb.Album:
 
 
 def _ytm_artist_to_pb(result: Dict[str, Any]) -> pb.Artist:
-    """Convert a ytmusicapi artist result to a protobuf Artist."""
+    """Convert a ytmusicapi artist result to a protobuf Artist message."""
     browse_id = result.get("browseId") or ""
     name = result.get("artist") or result.get("name") or ""
     return pb.Artist(id=browse_id, name=name)
@@ -447,80 +738,9 @@ def _ytm_playlist_to_pb(result: Dict[str, Any]) -> pb.Playlist:
     )
 
 
-def _resolve_stream_url(video_id: str, quality: int) -> tuple[str, dict[str, str], int]:
-    """Extract a direct audio stream URL for the given YouTube Music video ID."""
-    try:
-        import yt_dlp
-    except ImportError as exc:
-        raise RuntimeError("yt-dlp is not installed; install it via requirements.txt") from exc
-
-    format_selector = _QUALITY_FORMAT.get(quality, "bestaudio")
-    auth_data = _load_auth_file()
-
-    ydl_opts: Dict[str, Any] = {
-        "format": format_selector,
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "skip_download": True,
-        "extract_flat": False,
-    }
-
-    if auth_data:
-        # Write stored cookies to a temporary Netscape-format cookie file.
-        # This avoids the browser database locking issues that plague
-        # cookiesfrombrowser and keeps the exact cookie string we already
-        # validated during auth.
-        cookie_str = auth_data.get("cookie", "")
-        if cookie_str:
-            import tempfile
-            cookie_fd, cookie_path = tempfile.mkstemp(suffix=".txt")
-            try:
-                with os.fdopen(cookie_fd, "w") as f:
-                    f.write("# Netscape HTTP Cookie File")
-                    for part in cookie_str.split(";"):
-                        part = part.strip()
-                        if "=" not in part:
-                            continue
-                        k, v = part.split("=", 1)
-                        # Netscape format: domain  flag  path  secure  expiry  name  value
-                        f.write(
-                            f".youtube.com	TRUE	/	TRUE	0	{k.strip()}	{v.strip()}")
-                ydl_opts["cookiefile"] = cookie_path
-            except Exception:
-                os.close(cookie_fd)
-                raise
-        else:
-            logger.debug("No cookie string found in auth file")
-
-        # Pass the exact User-Agent used during auth so yt-dlp matches
-        # the browser fingerprint expected by YouTube.
-        user_agent = auth_data.get("user-agent", "")
-        if user_agent:
-            ydl_opts["http_headers"] = {"User-Agent": user_agent}
-
-    url = f"https://music.youtube.com/watch?v={video_id}"
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-
-    if info is None:
-        raise RuntimeError(f"yt-dlp returned no info for video_id={video_id}")
-
-    stream_url: str = info.get("url", "")
-    if not stream_url:
-        formats = info.get("formats", [])
-        if formats:
-            stream_url = formats[-1].get("url", "")
-
-    if not stream_url:
-        raise RuntimeError(f"No stream URL found for video_id={video_id}")
-
-    http_headers: dict[str, str] = info.get("http_headers", {})
-    headers = {key: str(value) for key, value in http_headers.items()}
-    expiry_ms = int((time.time() + 6 * 3600) * 1000)
-
-    return stream_url, headers, expiry_ms
-
+# ---------------------------------------------------------------------------
+# Servicer
+# ---------------------------------------------------------------------------
 
 class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
     """Implementation of the MusicProviderService gRPC service."""
@@ -528,7 +748,12 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._ytm: Optional[ytmusicapi.YTMusic] = None
+        # Unauthenticated client used exclusively for search (tracks, albums,
+        # artists, playlists). Playback and library calls use the authenticated
+        # client built by _get_client().
+        self._search_ytm = ytmusicapi.YTMusic()
         self._selenium_result: Dict[str, Any] = {}
+        self._pending_oauth: Optional[Dict[str, Any]] = None
         logger.info("MusicProviderServicer initialised — auth file: %s", _AUTH_FILE)
 
     def _get_client(self) -> ytmusicapi.YTMusic:
@@ -543,6 +768,25 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         with self._lock:
             self._ytm = None
 
+    def _require_auth(self, context: grpc.ServicerContext) -> ytmusicapi.YTMusic:
+        """Return a YTMusic client only when the user is authenticated.
+
+        If no credentials are present, aborts with UNAUTHENTICATED and an
+        actionable error message.
+        """
+        if _auth_status() != pb.AUTH_STATUS_AUTHENTICATED:
+            context.abort(
+                grpc.StatusCode.UNAUTHENTICATED,
+                "What failed: no valid credentials found. "
+                "How to fix: log in via Settings using OAuth or browser cookie authentication. "
+                "Fallback: public search and track details are still available without login.",
+            )
+        return self._get_client()
+
+    # -----------------------------------------------------------------------
+    # GetProviderMetadata
+    # -----------------------------------------------------------------------
+
     def GetProviderMetadata(
         self,
         request: pb.GetProviderMetadataRequest,
@@ -551,21 +795,87 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         """Return static provider metadata and current auth status."""
         status = _auth_status()
         logger.debug("GetProviderMetadata — auth_status=%d", status)
+
+        auth_url = ""
+        if self._pending_oauth:
+            auth_url = self._pending_oauth.get("verification_url", "")
+        elif status == pb.AUTH_STATUS_UNAUTHENTICATED:
+            auth_url = "https://music.youtube.com"
+
         return pb.GetProviderMetadataResponse(
             provider_id=PROVIDER_ID,
             display_name=DISPLAY_NAME,
             capabilities=_CAPABILITIES,
             auth_status=status,
+            auth_url=auth_url,
         )
+
+    # -----------------------------------------------------------------------
+    # InitiateAuth
+    # -----------------------------------------------------------------------
 
     def InitiateAuth(
         self,
         request: pb.InitiateAuthRequest,
         context: grpc.ServicerContext,
     ) -> pb.InitiateAuthResponse:
-        """Start browser-cookie authentication for YouTube Music."""
-        logger.info("InitiateAuth: launching browser auth")
+        """Start authentication.
 
+        Priority:
+            1. OAuth 2.0 device-code flow (if GOZIK_YTM_OAUTH_CLIENT_ID/SECRET are set).
+            2. Fast-path browser cookie extraction via yt_dlp.
+            3. Interactive Selenium browser login.
+        """
+        logger.info("InitiateAuth: starting authentication flow")
+
+        # Reset any stale state.
+        with self._lock:
+            self._pending_oauth = None
+            self._selenium_result = {}
+
+        # -------------------------------------------------------------------
+        # Tier 1 — OAuth 2.0
+        # -------------------------------------------------------------------
+        client_id, client_secret = _get_oauth_env_credentials()
+        if client_id and client_secret:
+            try:
+                oauth_creds = ytmusicapi.OAuthCredentials(
+                    client_id=client_id,
+                    client_secret=client_secret,
+                )
+                code_info = oauth_creds.get_code()
+                device_code = code_info["device_code"]
+                verification_url = code_info["verification_url"]
+                user_code = code_info["user_code"]
+
+                with self._lock:
+                    self._pending_oauth = {
+                        "device_code": device_code,
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                        "verification_url": verification_url,
+                        "user_code": user_code,
+                    }
+
+                auth_url = f"{verification_url}?user_code={user_code}"
+                logger.info(
+                    "InitiateAuth: OAuth device-code issued — user_code=%s", user_code
+                )
+                return pb.InitiateAuthResponse(
+                    auth_url=auth_url,
+                    device_code=device_code,
+                )
+            except Exception as exc:
+                logger.error(
+                    "InitiateAuth: OAuth initiation failed (%s). "
+                    "Falling back to browser cookie auth.",
+                    exc,
+                )
+                # Fall through to browser cookie fallback.
+
+        # -------------------------------------------------------------------
+        # Tier 2 — Fast-path browser cookie extraction
+        # -------------------------------------------------------------------
         browser_priority = [
             "chrome",
             "chromium",
@@ -614,13 +924,16 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
                     auth_url="https://music.youtube.com",
                     device_code="",
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.debug(
                     "InitiateAuth: fast-path probe '%s' failed (%s)",
                     browser_name,
                     exc,
                 )
 
+        # -------------------------------------------------------------------
+        # Tier 3 — Interactive Selenium login
+        # -------------------------------------------------------------------
         with self._lock:
             result: Dict[str, Any] = {"pending": True}
             self._selenium_result = result
@@ -632,28 +945,89 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         )
         thread.start()
 
+        logger.info("InitiateAuth: launched interactive Selenium login")
         return pb.InitiateAuthResponse(
             auth_url="https://music.youtube.com",
             device_code="",
         )
+
+    # -----------------------------------------------------------------------
+    # CompleteAuth
+    # -----------------------------------------------------------------------
 
     def CompleteAuth(
         self,
         request: pb.CompleteAuthRequest,
         context: grpc.ServicerContext,
     ) -> pb.CompleteAuthResponse:
-        """Complete browser-cookie, direct-cookie, or OAuth authentication."""
+        """Complete OAuth, browser-cookie, or direct-cookie authentication."""
         params: Dict[str, str] = dict(request.params)
         logger.info("CompleteAuth invoked with param keys: %s", list(params.keys()))
 
+        # -------------------------------------------------------------------
+        # Tier 1 — Complete pending OAuth flow
+        # -------------------------------------------------------------------
+        with self._lock:
+            pending_oauth = self._pending_oauth
+
+        if pending_oauth is not None:
+            try:
+                oauth_creds = ytmusicapi.OAuthCredentials(
+                    client_id=pending_oauth["client_id"],
+                    client_secret=pending_oauth["client_secret"],
+                )
+                token_response = oauth_creds.token_from_code(
+                    pending_oauth["device_code"]
+                )
+
+                # Preserve client credentials inside the token file so
+                # RefreshAuth and _build_ytmusic can reuse them later.
+                token_response["client_id"] = pending_oauth["client_id"]
+                token_response["client_secret"] = pending_oauth["client_secret"]
+
+                _save_oauth_file(token_response)
+
+                with self._lock:
+                    self._pending_oauth = None
+
+                self._invalidate_client()
+
+                access_token = token_response.get("access_token", "")
+                refresh_token = token_response.get("refresh_token", "")
+                expires_in = int(token_response.get("expires_in", 3600))
+                expires_at = int(time.time() * 1000) + expires_in * 1000
+
+                logger.info("CompleteAuth: OAuth token acquired, expires_at=%d", expires_at)
+                return pb.CompleteAuthResponse(
+                    access_token=access_token,
+                    refresh_token=refresh_token,
+                    expires_at=expires_at,
+                )
+            except Exception as exc:
+                logger.error("CompleteAuth OAuth poll failed: %s", exc, exc_info=True)
+                context.abort(
+                    grpc.StatusCode.UNAUTHENTICATED,
+                    "What failed: OAuth token exchange failed. "
+                    "How to fix: ensure you completed the Google consent screen, "
+                    "then retry. If OAuth is not configured, set "
+                    f"{_ENV_OAUTH_CLIENT_ID} and {_ENV_OAUTH_CLIENT_SECRET} "
+                    "environment variables and restart the server. "
+                    "Fallback: try browser cookie authentication instead.",
+                )
+                return pb.CompleteAuthResponse()
+
+        # -------------------------------------------------------------------
+        # Check Selenium result
+        # -------------------------------------------------------------------
         with self._lock:
             result = self._selenium_result
 
         if result.get("pending"):
             context.abort(
                 grpc.StatusCode.UNAUTHENTICATED,
-                "Browser authentication is still in progress. "
-                "Please finish logging in inside the opened browser window and try again.",
+                "What failed: browser authentication is still in progress. "
+                "How to fix: finish logging in inside the opened browser window and try again. "
+                "Fallback: public search is still available without login.",
             )
             return pb.CompleteAuthResponse()
 
@@ -669,10 +1043,16 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         if result.get("error"):
             context.abort(
                 grpc.StatusCode.UNAUTHENTICATED,
-                f"Browser auth failed: {result['error']}",
+                f"What failed: browser auth failed — {result['error']}. "
+                "How to fix: ensure a supported browser is installed, "
+                "or try logging in with a different browser. "
+                "Fallback: public search is still available without login.",
             )
             return pb.CompleteAuthResponse()
 
+        # -------------------------------------------------------------------
+        # Tier 2 — Auto-extract cookies from a named browser
+        # -------------------------------------------------------------------
         browser = _normalise_browser_name(params.get("browser", ""))
         if browser:
             try:
@@ -717,7 +1097,7 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
                     refresh_token="",
                     expires_at=0,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.error(
                     "Auto-extraction from browser %s failed: %s",
                     browser,
@@ -726,10 +1106,16 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
                 )
                 context.abort(
                     grpc.StatusCode.INVALID_ARGUMENT,
-                    f"Failed to extract cookies from browser '{browser}': {exc}",
+                    f"What failed: failed to extract cookies from browser '{browser}': {exc}. "
+                    "How to fix: ensure you are logged in to YouTube Music in that browser, "
+                    "or try a different browser. "
+                    "Fallback: public search is still available without login.",
                 )
                 return pb.CompleteAuthResponse()
 
+        # -------------------------------------------------------------------
+        # Manual cookie_json payload
+        # -------------------------------------------------------------------
         cookie_json = params.get("cookie_json", "")
         if cookie_json:
             try:
@@ -752,102 +1138,179 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
                     expires_at=0,
                 )
             except (json.JSONDecodeError, ValueError) as exc:
-                context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"Invalid cookie_json: {exc}")
-                return pb.CompleteAuthResponse()
-
-        pending_oauth = getattr(self, "_pending_oauth", None)
-        if pending_oauth is not None:
-            try:
-                oauth_helper = ytmusicapi.OAuthCredentials(
-                    client_id=ytmusicapi.YTMusic.OAUTH_CLIENT_ID,
-                    client_secret=ytmusicapi.YTMusic.OAUTH_CLIENT_SECRET,
-                    proxies=None,
-                    session=None,
-                )
-                token_response = oauth_helper.token_from_code(pending_oauth)
-
-                _OAUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
-                _OAUTH_FILE.write_text(
-                    json.dumps(token_response, indent=2),
-                    encoding="utf-8",
-                )
-
-                with self._lock:
-                    self._pending_oauth = None
-
-                self._invalidate_client()
-
-                access_token = token_response.get("access_token", "")
-                refresh_token = token_response.get("refresh_token", "")
-                expires_in = int(token_response.get("expires_in", 3600))
-                expires_at = int(time.time() * 1000) + expires_in * 1000
-
-                logger.info("CompleteAuth: OAuth token acquired, expires_at=%d", expires_at)
-                return pb.CompleteAuthResponse(
-                    access_token=access_token,
-                    refresh_token=refresh_token,
-                    expires_at=expires_at,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.error("CompleteAuth OAuth poll failed: %s", exc, exc_info=True)
                 context.abort(
-                    grpc.StatusCode.UNAUTHENTICATED,
-                    f"OAuth token exchange failed: {exc}",
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    f"What failed: invalid cookie_json payload: {exc}. "
+                    "How to fix: provide a valid JSON object containing browser auth headers. "
+                    "Fallback: public search is still available without login.",
                 )
                 return pb.CompleteAuthResponse()
 
-        auth_code = params.get("auth_code", "")
-        if auth_code:
-            logger.warning(
-                "CompleteAuth: manual auth_code path is not fully supported by ytmusicapi"
-            )
-            context.abort(
-                grpc.StatusCode.UNIMPLEMENTED,
-                "Manual auth_code exchange requires a running InitiateAuth session. "
-                "Restart the flow via InitiateAuth or supply 'cookie_json' instead.",
-            )
-            return pb.CompleteAuthResponse()
-
-        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "No valid auth payload provided in 'params'")
+        # -------------------------------------------------------------------
+        # Nothing matched
+        # -------------------------------------------------------------------
+        context.abort(
+            grpc.StatusCode.INVALID_ARGUMENT,
+            "What failed: no valid auth payload provided in 'params'. "
+            "How to fix: supply 'browser', 'cookie_json', or complete an OAuth consent screen. "
+            "Fallback: public search is still available without login.",
+        )
         return pb.CompleteAuthResponse()
+
+    # -----------------------------------------------------------------------
+    # RefreshAuth
+    # -----------------------------------------------------------------------
 
     def RefreshAuth(
         self,
         request: pb.RefreshAuthRequest,
         context: grpc.ServicerContext,
     ) -> pb.RefreshAuthResponse:
-        """Refresh OAuth auth or report browser-cookie auth as still usable."""
+        """Refresh OAuth tokens or report browser-cookie auth status."""
         logger.info("RefreshAuth requested")
 
+        # -------------------------------------------------------------------
+        # Tier 1 — Refresh OAuth access token
+        # -------------------------------------------------------------------
+        oauth_data = _load_oauth_file()
+        if oauth_data and oauth_data.get("refresh_token"):
+            client_id = oauth_data.get("client_id")
+            client_secret = oauth_data.get("client_secret")
+            if client_id and client_secret:
+                try:
+                    oauth_creds = ytmusicapi.OAuthCredentials(
+                        client_id=client_id,
+                        client_secret=client_secret,
+                    )
+                    refreshed = oauth_creds.refresh_token(oauth_data["refresh_token"])
+
+                    # Preserve fields that the refresh response does not include.
+                    refreshed["refresh_token"] = oauth_data["refresh_token"]
+                    refreshed["client_id"] = client_id
+                    refreshed["client_secret"] = client_secret
+                    expires_in = int(refreshed.get("expires_in", 3600))
+                    expires_at = int(time.time()) + expires_in
+                    refreshed["expires_at"] = expires_at
+
+                    _save_oauth_file(refreshed)
+                    self._invalidate_client()
+
+                    logger.info(
+                        "RefreshAuth: OAuth token refreshed, expires_at=%d", expires_at
+                    )
+                    return pb.RefreshAuthResponse(
+                        access_token=refreshed["access_token"],
+                        expires_at=expires_at * 1000,
+                    )
+                except Exception as exc:
+                    logger.error("RefreshAuth: OAuth refresh failed: %s", exc, exc_info=True)
+                    context.abort(
+                        grpc.StatusCode.UNAUTHENTICATED,
+                        "What failed: OAuth token refresh failed. "
+                        "How to fix: re-authenticate in Settings. "
+                        "If the issue persists, verify your OAuth client credentials. "
+                        "Fallback: browser cookie authentication or public mode is available.",
+                    )
+                    return pb.RefreshAuthResponse()
+
+        # -------------------------------------------------------------------
+        # Tier 2 — Browser cookie auth (no refresh mechanism)
+        # -------------------------------------------------------------------
+        if _load_auth_file() is not None:
+            logger.info("RefreshAuth: browser-cookie auth does not expose refresh")
+            return pb.RefreshAuthResponse(
+                access_token="browser_cookie",
+                expires_at=0,
+            )
+
+        # -------------------------------------------------------------------
+        # Tier 3 — Nothing available
+        # -------------------------------------------------------------------
+        context.abort(
+            grpc.StatusCode.UNAUTHENTICATED,
+            "What failed: no credentials found. "
+            "How to fix: authenticate first via Settings using OAuth or browser cookies. "
+            "Fallback: public search is still available without login.",
+        )
+        return pb.RefreshAuthResponse()
+
+    # -----------------------------------------------------------------------
+    # yt-dlp track search (unauthenticated)
+    # -----------------------------------------------------------------------
+
+    def _search_tracks_ytdlp(self, query: str, limit: int) -> List[pb.Track]:
+        """Return a list of protobuf Track messages using yt-dlp search.
+
+        yt-dlp performs an unauthenticated YouTube search and returns actual
+        music videos with valid videoIds.  These identifiers are later fed
+        into the authenticated playback backend.
+        """
         try:
-            if _OAUTH_FILE.exists():
-                self._invalidate_client()
-                self._get_client()
+            import yt_dlp
+        except ImportError:
+            logger.warning("yt-dlp is not installed; track search unavailable")
+            return []
 
-                token_data = json.loads(_OAUTH_FILE.read_text(encoding="utf-8"))
-                access_token = token_data.get("access_token", "")
-                expires_in = int(token_data.get("expires_in", 3600))
-                expires_at = int(time.time() * 1000) + expires_in * 1000
+        ydl_opts: Dict[str, Any] = {
+            "quiet": True,
+            "extract_flat": True,
+            "playlistend": limit,
+        }
 
-                logger.info("RefreshAuth: token refreshed, expires_at=%d", expires_at)
-                return pb.RefreshAuthResponse(
-                    access_token=access_token,
-                    expires_at=expires_at,
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+        except Exception as exc:
+            logger.warning("yt-dlp track search failed: %s", exc)
+            return []
+
+        entries: List[Dict[str, Any]] = info.get("entries") or []
+        tracks: List[pb.Track] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            track = self._ytdlp_result_to_pb(entry)
+            if track and track.id:
+                tracks.append(track)
+        return tracks
+
+    def _ytdlp_result_to_pb(self, result: Dict[str, Any]) -> pb.Track:
+        """Convert a yt-dlp search entry to a protobuf Track message."""
+        video_id = result.get("id") or ""
+        title = result.get("title") or ""
+        if not video_id or not title:
+            return pb.Track()
+
+        uploader = result.get("uploader") or ""
+        artists = [pb.Artist(id="", name=uploader)] if uploader else []
+
+        duration_s = result.get("duration")
+        duration_ms = int(duration_s * 1000) if isinstance(duration_s, (int, float)) else 0
+
+        images: List[pb.Image] = []
+        for thumb in result.get("thumbnails") or []:
+            if isinstance(thumb, dict):
+                images.append(
+                    pb.Image(
+                        url=thumb.get("url", ""),
+                        width=thumb.get("width", 0),
+                        height=thumb.get("height", 0),
+                    )
                 )
 
-            if _AUTH_FILE.exists():
-                logger.info("RefreshAuth: browser-cookie auth does not expose refresh")
-                return pb.RefreshAuthResponse(
-                    access_token="browser_cookie",
-                    expires_at=0,
-                )
+        return pb.Track(
+            id=video_id,
+            title=title,
+            artists=artists,
+            album=pb.Album(),
+            duration_ms=duration_ms,
+            images=images,
+            explicit=False,
+        )
 
-            context.abort(grpc.StatusCode.UNAUTHENTICATED, "No credentials found; authenticate first")
-            return pb.RefreshAuthResponse()
-        except Exception as exc:  # noqa: BLE001
-            logger.error("RefreshAuth error: %s", exc, exc_info=True)
-            context.abort(grpc.StatusCode.INTERNAL, f"RefreshAuth failed: {exc}")
-            return pb.RefreshAuthResponse()
+    # -----------------------------------------------------------------------
+    # Search
+    # -----------------------------------------------------------------------
 
     def Search(
         self,
@@ -857,7 +1320,11 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         """Search YouTube Music for tracks, albums, artists, and playlists."""
         query = request.query.strip()
         if not query:
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Query must not be empty")
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "What failed: query must not be empty. "
+                "How to fix: provide a non-empty search query.",
+            )
             return pb.SearchResponse()
 
         limit = request.limit if request.limit > 0 else 20
@@ -886,26 +1353,42 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
 
         client = self._get_client()
 
+        # Use the unauthenticated search client for all discovery.
+        search_client = self._search_ytm
+
         for media_type, ytm_filter in categories_to_fetch:
             try:
-                results = client.search(query=query, filter=ytm_filter, limit=limit)
-                if not isinstance(results, list):
-                    continue
-
-                for item in results[:limit]:
-                    if not isinstance(item, dict):
+                if media_type == pb.MEDIA_TYPE_TRACK:
+                    # yt-dlp unauthenticated YouTube search returns actual
+                    # music videos with reliable metadata and playable videoIds.
+                    # The videoIds are later resolved by the authenticated
+                    # playback backend, keeping search and playback decoupled.
+                    tracks.extend(
+                        self._search_tracks_ytdlp(query=query, limit=limit)
+                    )
+                else:
+                    results = search_client.search(
+                        query=query, filter=ytm_filter, limit=limit
+                    )
+                    if not isinstance(results, list):
                         continue
 
-                    if media_type == pb.MEDIA_TYPE_TRACK:
-                        tracks.append(_ytm_track_to_pb(item))
-                    elif media_type == pb.MEDIA_TYPE_ALBUM:
-                        albums.append(_ytm_album_to_pb(item))
-                    elif media_type == pb.MEDIA_TYPE_ARTIST:
-                        artists.append(_ytm_artist_to_pb(item))
-                    elif media_type == pb.MEDIA_TYPE_PLAYLIST:
-                        playlists.append(_ytm_playlist_to_pb(item))
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Search error for filter=%s: %s", ytm_filter, exc)
+                    for item in results[:limit]:
+                        if not isinstance(item, dict):
+                            continue
+
+                        if media_type == pb.MEDIA_TYPE_ALBUM:
+                            albums.append(_ytm_album_to_pb(item))
+                        elif media_type == pb.MEDIA_TYPE_ARTIST:
+                            artists.append(_ytm_artist_to_pb(item))
+                        elif media_type == pb.MEDIA_TYPE_PLAYLIST:
+                            playlists.append(_ytm_playlist_to_pb(item))
+            except Exception as exc:
+                logger.warning(
+                    "Search error for filter=%s: %s",
+                    ytm_filter if media_type != pb.MEDIA_TYPE_TRACK else "tracks",
+                    exc,
+                )
 
         logger.info(
             "Search('%s') → tracks=%d albums=%d artists=%d playlists=%d",
@@ -924,6 +1407,10 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
             next_page_token="",
         )
 
+    # -----------------------------------------------------------------------
+    # SearchSuggestions
+    # -----------------------------------------------------------------------
+
     def SearchSuggestions(
         self,
         request: pb.SearchSuggestionsRequest,
@@ -939,9 +1426,14 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
 
         try:
             raw_suggestions = client.get_search_suggestions(query)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("SearchSuggestions error: %s", exc, exc_info=True)
-            context.abort(grpc.StatusCode.INTERNAL, f"Failed to fetch suggestions: {exc}")
+            context.abort(
+                grpc.StatusCode.INTERNAL,
+                f"What failed: failed to fetch suggestions: {exc}. "
+                "How to fix: check your network connection or try again later. "
+                "Fallback: public search is still available without login.",
+            )
             return
 
         if not isinstance(raw_suggestions, list):
@@ -971,6 +1463,10 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
             )
             count += 1
 
+    # -----------------------------------------------------------------------
+    # GetTrackDetails
+    # -----------------------------------------------------------------------
+
     def GetTrackDetails(
         self,
         request: pb.GetTrackDetailsRequest,
@@ -979,16 +1475,25 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         """Fetch detailed metadata for a single track by video ID."""
         video_id = request.track_id.strip()
         if not video_id:
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "track_id must not be empty")
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "What failed: track_id must not be empty. "
+                "How to fix: provide a valid track ID.",
+            )
             return pb.GetTrackDetailsResponse()
 
         client = self._get_client()
 
         try:
             song_info = client.get_song(video_id)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("GetTrackDetails error for %s: %s", video_id, exc, exc_info=True)
-            context.abort(grpc.StatusCode.NOT_FOUND, f"Track not found or API error: {exc}")
+            context.abort(
+                grpc.StatusCode.NOT_FOUND,
+                f"What failed: track not found or API error: {exc}. "
+                "How to fix: verify the track ID or try again later. "
+                "Fallback: public search is still available without login.",
+            )
             return pb.GetTrackDetailsResponse()
 
         video_details = song_info.get("videoDetails", {}) if isinstance(song_info, dict) else {}
@@ -1013,6 +1518,10 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         logger.debug("GetTrackDetails: %s → '%s'", video_id, title)
         return pb.GetTrackDetailsResponse(track=track)
 
+    # -----------------------------------------------------------------------
+    # ResolveStream
+    # -----------------------------------------------------------------------
+
     def ResolveStream(
         self,
         request: pb.ResolveStreamRequest,
@@ -1021,7 +1530,11 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         """Resolve a direct pre-signed audio stream URL for a track."""
         video_id = request.track_id.strip()
         if not video_id:
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "track_id must not be empty")
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "What failed: track_id must not be empty. "
+                "How to fix: provide a valid track ID.",
+            )
             return pb.ResolveStreamResponse()
 
         quality = request.preferred_quality
@@ -1029,9 +1542,19 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
 
         try:
             stream_url, headers, expiry_ms = _resolve_stream_url(video_id, quality)
-        except Exception as exc:  # noqa: BLE001
+        except RuntimeError as exc:
+            logger.error("ResolveStream failed for %s: %s", video_id, exc)
+            context.abort(grpc.StatusCode.INTERNAL, str(exc))
+            return pb.ResolveStreamResponse()
+        except Exception as exc:
             logger.error("ResolveStream failed for %s: %s", video_id, exc, exc_info=True)
-            context.abort(grpc.StatusCode.INTERNAL, f"Stream resolution failed: {exc}")
+            context.abort(
+                grpc.StatusCode.INTERNAL,
+                f"What failed: stream resolution failed: {exc}. "
+                "How to fix: update yt-dlp: `pip install -U yt-dlp` or "
+                "`yt-dlp -U --update-to nightly`. "
+                "Fallback: public search is still available without streaming.",
+            )
             return pb.ResolveStreamResponse()
 
         logger.info("ResolveStream: resolved URL (len=%d) for %s", len(stream_url), video_id)
@@ -1041,6 +1564,10 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
             expiry_ms=expiry_ms,
         )
 
+    # -----------------------------------------------------------------------
+    # StreamAudio
+    # -----------------------------------------------------------------------
+
     def StreamAudio(
         self,
         request: pb.StreamAudioRequest,
@@ -1049,7 +1576,11 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         """Stream raw audio bytes for a track directly over gRPC."""
         video_id = request.track_id.strip()
         if not video_id:
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "track_id must not be empty")
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "What failed: track_id must not be empty. "
+                "How to fix: provide a valid track ID.",
+            )
             return
 
         quality = request.quality
@@ -1086,9 +1617,21 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
 
                     yield pb.AudioChunk(data=chunk, timestamp_ms=timestamp_ms, eof=False)
                     timestamp_ms += int(len(chunk) / 16)
-        except Exception as exc:  # noqa: BLE001
+        except RuntimeError as exc:
+            logger.error("StreamAudio error for %s: %s", video_id, exc)
+            context.abort(grpc.StatusCode.INTERNAL, str(exc))
+        except Exception as exc:
             logger.error("StreamAudio error for %s: %s", video_id, exc, exc_info=True)
-            context.abort(grpc.StatusCode.INTERNAL, f"Audio streaming failed: {exc}")
+            context.abort(
+                grpc.StatusCode.INTERNAL,
+                f"What failed: audio streaming failed: {exc}. "
+                "How to fix: check your network connection or update yt-dlp. "
+                "Fallback: public search is still available without streaming.",
+            )
+
+    # -----------------------------------------------------------------------
+    # GetUserLibrary
+    # -----------------------------------------------------------------------
 
     def GetUserLibrary(
         self,
@@ -1096,21 +1639,29 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         context: grpc.ServicerContext,
     ) -> pb.GetUserLibraryResponse:
         """Return the authenticated user's liked songs library."""
-        if _auth_status() != pb.AUTH_STATUS_AUTHENTICATED:
-            context.abort(
-                grpc.StatusCode.UNAUTHENTICATED,
-                "Authentication required to access user library",
-            )
-            return pb.GetUserLibraryResponse()
+        client = self._require_auth(context)
 
         limit = request.limit if request.limit > 0 else 25
-        client = self._get_client()
 
         try:
             liked_songs = client.get_liked_songs(limit=limit)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("GetUserLibrary error: %s", exc, exc_info=True)
-            context.abort(grpc.StatusCode.INTERNAL, f"Failed to fetch library: {exc}")
+            error_str = str(exc).lower()
+            if "unauthorized" in error_str or "authentication" in error_str or "sign in" in error_str:
+                context.abort(
+                    grpc.StatusCode.UNAUTHENTICATED,
+                    "What failed: your session expired or you are not logged in. "
+                    "How to fix: re-authenticate in Settings using OAuth or browser cookies. "
+                    "Fallback: public search is still available without login.",
+                )
+            else:
+                context.abort(
+                    grpc.StatusCode.INTERNAL,
+                    f"What failed: failed to fetch library: {exc}. "
+                    "How to fix: check your network connection or try again later. "
+                    "Fallback: public search is still available without login.",
+                )
             return pb.GetUserLibraryResponse()
 
         tracks: List[pb.Track] = []
@@ -1123,27 +1674,39 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         logger.info("GetUserLibrary: returning %d liked tracks", len(tracks))
         return pb.GetUserLibraryResponse(tracks=tracks, next_page_token="")
 
+    # -----------------------------------------------------------------------
+    # GetUserPlaylists
+    # -----------------------------------------------------------------------
+
     def GetUserPlaylists(
         self,
         request: pb.GetUserPlaylistsRequest,
         context: grpc.ServicerContext,
     ) -> pb.GetUserPlaylistsResponse:
         """Return the authenticated user's playlists."""
-        if _auth_status() != pb.AUTH_STATUS_AUTHENTICATED:
-            context.abort(
-                grpc.StatusCode.UNAUTHENTICATED,
-                "Authentication required to fetch user playlists",
-            )
-            return pb.GetUserPlaylistsResponse()
+        client = self._require_auth(context)
 
         limit = request.limit if request.limit > 0 else 50
-        client = self._get_client()
 
         try:
             raw_playlists = client.get_library_playlists(limit=limit)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("GetUserPlaylists error: %s", exc, exc_info=True)
-            context.abort(grpc.StatusCode.INTERNAL, f"Failed to fetch playlists: {exc}")
+            error_str = str(exc).lower()
+            if "unauthorized" in error_str or "authentication" in error_str or "sign in" in error_str:
+                context.abort(
+                    grpc.StatusCode.UNAUTHENTICATED,
+                    "What failed: your session expired or you are not logged in. "
+                    "How to fix: re-authenticate in Settings using OAuth or browser cookies. "
+                    "Fallback: public search is still available without login.",
+                )
+            else:
+                context.abort(
+                    grpc.StatusCode.INTERNAL,
+                    f"What failed: failed to fetch playlists: {exc}. "
+                    "How to fix: check your network connection or try again later. "
+                    "Fallback: public search is still available without login.",
+                )
             return pb.GetUserPlaylistsResponse()
 
         playlists: List[pb.Playlist] = []
@@ -1170,6 +1733,10 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         logger.info("GetUserPlaylists: returning %d playlists", len(playlists))
         return pb.GetUserPlaylistsResponse(playlists=playlists, next_page_token="")
 
+    # -----------------------------------------------------------------------
+    # GetPlaylistDetails
+    # -----------------------------------------------------------------------
+
     def GetPlaylistDetails(
         self,
         request: pb.GetPlaylistDetailsRequest,
@@ -1178,7 +1745,11 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         """Return metadata and track listing for a specific playlist."""
         playlist_id = request.playlist_id.strip()
         if not playlist_id:
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "playlist_id must not be empty")
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "What failed: playlist_id must not be empty. "
+                "How to fix: provide a valid playlist ID.",
+            )
             return pb.GetPlaylistDetailsResponse()
 
         limit = request.limit if request.limit > 0 else 100
@@ -1186,13 +1757,23 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
 
         try:
             raw = client.get_playlist(playlistId=playlist_id, limit=limit)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("GetPlaylistDetails error for %s: %s", playlist_id, exc, exc_info=True)
-            context.abort(grpc.StatusCode.NOT_FOUND, f"Playlist not found or API error: {exc}")
+            context.abort(
+                grpc.StatusCode.NOT_FOUND,
+                f"What failed: playlist not found or API error: {exc}. "
+                "How to fix: verify the playlist ID or try again later. "
+                "Fallback: public search is still available without login.",
+            )
             return pb.GetPlaylistDetailsResponse()
 
         if not isinstance(raw, dict):
-            context.abort(grpc.StatusCode.INTERNAL, "Unexpected API response format")
+            context.abort(
+                grpc.StatusCode.INTERNAL,
+                "What failed: unexpected API response format. "
+                "How to fix: try again later. "
+                "Fallback: public search is still available without login.",
+            )
             return pb.GetPlaylistDetailsResponse()
 
         title = raw.get("title") or ""

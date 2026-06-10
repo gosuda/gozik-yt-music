@@ -13,7 +13,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROTO_SOURCE_DIR="${SCRIPT_DIR}/../gozik/api/music/v1"
 OUTPUT_DIR="${SCRIPT_DIR}/generated"
-GOOGLEAPIS_DIR="${SCRIPT_DIR}/third_party/googleapis"
+
+# Allow callers (e.g. make dev) to inject a virtualenv python.
+PYTHON="${PYTHON:-python3}"
 
 # ---------------------------------------------------------------------------
 # Validate that the proto source directory exists.
@@ -35,7 +37,7 @@ touch "${OUTPUT_DIR}/__init__.py"
 # is bundled with grpcio-tools, so we only need to point the include path at
 # the grpcio-tools installation.
 # ---------------------------------------------------------------------------
-GRPC_TOOLS_PROTO_PATH=$(python3 -c "
+GRPC_TOOLS_PROTO_PATH=$(${PYTHON} -c "
 import grpc_tools, os
 print(os.path.join(os.path.dirname(grpc_tools.__file__), '_proto'))
 ")
@@ -47,7 +49,7 @@ echo "grpcio-tools  : ${GRPC_TOOLS_PROTO_PATH}"
 # ---------------------------------------------------------------------------
 # Compile music_provider.proto
 # ---------------------------------------------------------------------------
-python3 -m grpc_tools.protoc \
+${PYTHON} -m grpc_tools.protoc \
     --proto_path="${PROTO_SOURCE_DIR}" \
     --proto_path="${GRPC_TOOLS_PROTO_PATH}" \
     --python_out="${OUTPUT_DIR}" \
@@ -55,18 +57,6 @@ python3 -m grpc_tools.protoc \
     "${PROTO_SOURCE_DIR}/music_provider.proto"
 
 echo "Compiled: music_provider.proto"
-
-# ---------------------------------------------------------------------------
-# Compile provider_link.proto (imports google/protobuf/timestamp.proto)
-# ---------------------------------------------------------------------------
-python3 -m grpc_tools.protoc \
-    --proto_path="${PROTO_SOURCE_DIR}" \
-    --proto_path="${GRPC_TOOLS_PROTO_PATH}" \
-    --python_out="${OUTPUT_DIR}" \
-    --grpc_python_out="${OUTPUT_DIR}" \
-    "${PROTO_SOURCE_DIR}/provider_link.proto"
-
-echo "Compiled: provider_link.proto"
 
 # ---------------------------------------------------------------------------
 # Fix relative imports in generated files so they resolve correctly when

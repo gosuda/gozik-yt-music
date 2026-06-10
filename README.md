@@ -14,13 +14,15 @@ Implemented as a standalone background gRPC daemon that the gozik Go frontend co
 │  github.com/gg582/gozik         │  127.0.0.1:50051           │  gozik-yt-music (this repo)   │
 │                                 │  ◄──────────────────────   │  Python 3 / Nuitka binary     │
 └─────────────────────────────────┘                            │  MusicProviderService gRPC    │
-                                                               └──────────────────────────────┘
-                                                                           │
-                                                                    ytmusicapi + yt-dlp
-                                                                           │
-                                                               ┌──────────────────────────────┐
-                                                               │  YouTube Music API            │
-                                                               └──────────────────────────────┘
+                               │                               └──────────────────────────────┘
+                               │                                           │
+                               │                                    ytmusicapi + yt-dlp
+                               │                                           │
+                               │           ┌──────────────────────────────┐
+                               └──────────►│  YouTube Music API            │
+                               HTTP        └──────────────────────────────┘
+                               127.0.0.1:50052
+                          (built-in web UI)
 ```
 
 The plugin runs as a persistent daemon and is registered as a boot-time service by the platform-specific installer (Windows service via NSSM, macOS LaunchAgent, Linux systemd user unit).
@@ -32,9 +34,12 @@ The plugin runs as a persistent daemon and is registered as a boot-time service 
 | Capability | RPC method | Notes |
 |---|---|---|
 | Provider metadata & auth status | `GetProviderMetadata` | Returns `AUTH_STATUS_AUTHENTICATED` if credentials exist |
-| OAuth2 device-code login | `InitiateAuth` / `CompleteAuth` | Browser-less flow; device URL displayed in the gozik UI |
+| OAuth2 device-code login | `InitiateAuth` / `CompleteAuth` | Browser-less flow; device URL displayed in the gozik UI or built-in web UI |
 | Browser cookie auth | `CompleteAuth` with `cookie_json` | Paste the JSON exported by ytmusicapi's browser auth helper |
 | Token refresh | `RefreshAuth` | Transparent refresh of OAuth tokens |
+| Built-in web UI | `http.server` on port 50052 | Dark-themed dashboard for auth, status, and logout without the gozik app |
+| Desktop entry auto-registration | `handlers/desktop_entry.py` | Creates an app-menu shortcut on first startup or first successful auth |
+| Search | `Search` | Songs, albums, artists, playlists |
 | Search | `Search` | Songs, albums, artists, playlists |
 | Autocomplete | `SearchSuggestions` (streaming) | Real-time suggestions as the user types |
 | Track details | `GetTrackDetails` | Full metadata for a single video ID |
@@ -52,7 +57,10 @@ The plugin runs as a persistent daemon and is registered as a boot-time service 
 gozik-yt-music/
 ├── server.py              # gRPC server entrypoint (bind 127.0.0.1:50051)
 ├── handlers/
-│   └── provider.py        # MusicProviderServiceServicer — all 12 RPCs implemented
+│   ├── provider.py        # MusicProviderServiceServicer — all 12 RPCs implemented
+│   ├── webui.py           # Stand-alone HTTP dashboard (port 50052, stdlib only)
+│   └── desktop_entry.py   # Cross-platform app-menu registration (Linux/Windows/macOS)
+├── assets/                # Desktop icon (SVG)
 ├── generated/             # Protobuf Python stubs (produced by codegen.sh)
 │   ├── __init__.py
 │   ├── music_provider_pb2.py
@@ -175,6 +183,29 @@ python3 server.py
 
 ### Option C — Build a release binary locally
 
+**Quick install (Makefile)** — build and install in one go:
+
+```bash
+cd gozik-yt-music
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+bash codegen.sh
+
+# Build + install + start daemon (all at once)
+make && make install-user && sudo systemctl enable --user --now gozik-yt-music-server
+```
+
+Or step by step:
+
+```bash
+make              # build the release binary
+sudo make install # install binary + systemd unit
+sudo systemctl enable --now gozik-yt-music-server
+```
+
+**Manual build** (same as `make`, but invoked directly):
+
 ```bash
 cd gozik-yt-music
 python3 -m venv .venv
@@ -192,6 +223,51 @@ bash package.sh --debug
 bash package.sh --no-ccache
 ```
 
+**Makefile targets**
+
+| Target | Description |
+|---|---|
+| `make` or `make all` | Build the release binary (`dist/gozik-yt-music-server`) |
+| `make install` | Install binary, systemd unit, **desktop entry**, and icon system-wide |
+| `sudo make uninstall` | Remove the installed binary, systemd unit, desktop entry, and icon |
+| `make clean` | Remove `dist/`, build scratch directories, and `__pycache__` |
+| `make codegen` | Regenerate protobuf Python stubs |
+
+**Install prefix**
+
+Default is `/usr/local`. Override with:
+
+```bash
+make PREFIX=/opt
+sudo make PREFIX=/opt install
+```
+
+**DESTDIR support**
+
+Useful for distro packaging or staged installs:
+
+```bash
+sudo make DESTDIR=/tmp/stage install
+# creates /tmp/stage/usr/local/bin/gozik-yt-music-server
+# and /tmp/stage/etc/systemd/system/gozik-yt-music-server.service
+# and /tmp/stage/usr/local/share/applications/gozik-yt-music-webui.desktop
+```
+
+**Safety check**
+
+`make install` refuses to run if the binary has not been built yet (prevents accidental rebuild under `sudo`).
+
+```bash
+sudo make install
+# Binary not found: dist/gozik-yt-music-server. Run 'make' first.
+```
+
+**Uninstall**
+
+```bash
+sudo make uninstall
+```
+
 The binary is fully self-contained. Copy `dist/gozik-yt-music-server` to any machine with the same OS/arch and run it directly.
 
 ---
@@ -202,13 +278,26 @@ The daemon supports two authentication methods. Both persist credentials to `~/.
 
 ### Method 1 — OAuth2 device-code flow (recommended)
 
+**Via gozik desktop UI:**
+
 Trigger from the gozik UI via **Settings → Plugins → YouTube Music → Connect**. The UI calls `InitiateAuth`, receives a verification URL and device code, and displays them. Visit the URL on any device, approve access, then confirm in the gozik UI which calls `CompleteAuth`.
+
+**Via built-in web UI (no gozik app required):**
+
+1. Open [http://127.0.0.1:50052](http://127.0.0.1:50052) in your browser.
+2. Click **Authenticate** → **Start OAuth**.
+3. Open the verification URL in any browser, enter the device code, and approve access.
+4. Return to the web UI and click **Complete**.
 
 Credentials are saved to `~/.config/gozik/ytmusic_oauth.json`.
 
 ### Method 2 — Browser cookie authentication
 
-Follow the [ytmusicapi browser auth guide](https://ytmusicapi.readthedocs.io/en/stable/setup/browser.html) to export your YouTube Music cookies, then pass the resulting JSON to the gozik UI.
+Follow the [ytmusicapi browser auth guide](https://ytmusicapi.readthedocs.io/en/stable/setup/browser.html) to export your YouTube Music cookies.
+
+**Via gozik desktop UI:** pass the resulting JSON to the gozik UI.
+
+**Via built-in web UI:** open the web console, go to **Authenticate**, paste the JSON into the **Browser Cookie Login** textarea, and click **Save Cookie**.
 
 Credentials are saved to `~/.config/gozik/ytmusic_auth.json`.
 
@@ -231,13 +320,66 @@ Credentials are saved to `~/.config/gozik/ytmusic_auth.json`.
 | `GOZIK_YTM_HOST` | `127.0.0.1` | Bind host |
 | `GOZIK_YTM_PORT` | `50051` | Bind port |
 | `GOZIK_YTM_WORKERS` | `4` | gRPC thread-pool size |
+| `GOZIK_YTM_WEBUI_PORT` | `50052` | Web UI HTTP port (set to `0` to disable) |
+| `GOZIK_YTM_REGISTER_DESKTOP` | `auto` | Desktop entry behaviour (`auto`/`always`/`never`) |
 | `XDG_CONFIG_HOME` | `~/.config` | Base directory for credential storage |
 
 ---
 
 ## Daemon management
 
+### Web UI
+
+When the server is running, open [http://127.0.0.1:50052](http://127.0.0.1:50052) in your browser.
+
+| Page | Path | Description |
+|---|---|---|
+| Dashboard | `/` | Auth status, capabilities, and logout |
+| Authenticate | `/login` | OAuth device-code flow and cookie login |
+| Status JSON | `/api/status` | Machine-readable provider metadata |
+
+The web UI is served only on loopback (`127.0.0.1`) and requires no extra dependencies.
+
+#### Desktop entry (app-menu shortcut)
+
+The server can automatically register itself in the desktop environment's app menu:
+
+- **Linux**: creates `~/.local/share/applications/gozik-yt-music-webui.desktop`
+- **Windows**: creates a Start Menu shortcut via PowerShell
+- **macOS**: creates `~/Applications/gozik-yt-music-webui.app`
+
+Registration happens on **first server startup** (if `--register-desktop-entry=auto`) and again on **first successful authentication** via the web UI, so standalone binaries (AppImage, `.exe`, Nuitka onefile) that are not installed via a package manager still get a menu entry without manual setup.
+
+| Flag | Behaviour |
+|---|---|
+| `--register-desktop-entry auto` | Register once if missing (default) |
+| `--register-desktop-entry always` | Always overwrite existing entry |
+| `--register-desktop-entry never` | Skip registration entirely |
+
+When using `make install`, the desktop entry and icon are installed system-wide under `$PREFIX/share/applications/` and `$PREFIX/share/icons/hicolor/scalable/apps/` instead.
+
 ### Linux (systemd)
+
+When installed via `sudo make install` (system-wide service):
+
+```bash
+# Status
+sudo systemctl status gozik-yt-music-server
+
+# Restart
+sudo systemctl restart gozik-yt-music-server
+
+# Stop
+sudo systemctl stop gozik-yt-music-server
+
+# Disable autostart
+sudo systemctl disable gozik-yt-music-server
+
+# View logs
+sudo journalctl -u gozik-yt-music-server -f
+```
+
+When using the AppImage / per-user installer (`--user` service):
 
 ```bash
 # Status
