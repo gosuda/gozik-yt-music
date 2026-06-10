@@ -92,53 +92,7 @@ make install-user
 
 ## Installation
 
-### Option A — Pre-built binaries (recommended)
-
-Download the latest release from the [Releases](https://github.com/gg582/gozik/releases) page.
-
-**Linux (AppImage)**
-
-```bash
-# Download
-curl -fsSL -O https://github.com/gg582/gozik/releases/latest/download/gozik-ytmusic-plugin-linux-amd64-<version>.AppImage
-chmod +x gozik-ytmusic-plugin-linux-amd64-<version>.AppImage
-
-# First launch installs the binary and registers the systemd user unit
-./gozik-ytmusic-plugin-linux-amd64-<version>.AppImage
-
-# Verify the daemon is running
-systemctl --user status gozik-ytmusic.service
-```
-
-For ARM64 and RISCV64, replace `amd64` with `arm64` or `riscv64`.
-
-**macOS (DMG)**
-
-1. Open `gozik-ytmusic-plugin-macos-arm64-<version>.dmg`.
-2. Drag `gozik YouTube Music Plugin.app` to `/Applications`.
-3. Run the registration helper once:
-
-```bash
-/Applications/gozik\ YouTube\ Music\ Plugin.app/Contents/MacOS/install-daemon.sh
-```
-
-The LaunchAgent (`com.gosuda.gozik.ytmusic.plist`) is copied to `~/Library/LaunchAgents/` and loaded immediately. The daemon will start automatically on every login.
-
-**Windows (Installer)**
-
-Run `gozik-ytmusic-plugin-windows-amd64.exe` as Administrator.
-
-The installer:
-- Copies the binary to `%ProgramFiles%\gozik\plugins\ytmusic\`
-- Registers `GozikYTMusicPlugin` as a Windows service via NSSM
-- Configures `SERVICE_AUTO_START` so the daemon starts on every system boot without requiring a user login
-- Starts the service immediately
-
-To uninstall: use **Add or Remove Programs** → the uninstaller stops and removes the service automatically.
-
----
-
-### Option B — Run from source
+### Run from source
 
 ```bash
 # 1. Clone both repositories as siblings
