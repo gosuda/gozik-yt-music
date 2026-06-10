@@ -2,7 +2,7 @@
 
 YouTube Music plugin server for the [gozik](https://github.com/gg582/gozik) desktop music player.
 
-Implemented as a standalone background gRPC daemon that the gozik Go frontend connects to over localhost. Built with [ytmusicapi](https://github.com/sigma67/ytmusicapi) and compiled to a self-contained single-file binary via [Nuitka](https://nuitka.net/) — no Python interpreter required on end-user machines.
+Implemented as a standalone background gRPC daemon that the gozik Go frontend connects to over localhost. Built with [ytmusicapi](https://github.com/sigma67/ytmusicapi) and PyInstaller
 
 ---
 
@@ -11,15 +11,15 @@ Implemented as a standalone background gRPC daemon that the gozik Go frontend co
 ```
 ┌─────────────────────────────────┐        gRPC / loopback
 │  gozik (Go + GTK3 frontend)     │  ──────────────────────►  ┌──────────────────────────────┐
-│  github.com/gg582/gozik         │  127.0.0.1:50051           │  gozik-yt-music (this repo)   │
-│                                 │  ◄──────────────────────   │  Python 3 / Nuitka binary     │
-└─────────────────────────────────┘                            │  MusicProviderService gRPC    │
-                               │                               └──────────────────────────────┘
+│  github.com/gosuda/gozik        │  127.0.0.1:50051          │  gozik-yt-music (this repo)  │
+│                                 │  ◄──────────────────────  │  Python 3 / Nuitka binary    │
+└─────────────────────────────────┘                           │  MusicProviderService gRPC   │
+                               │                              └──────────────────────────────┘
                                │                                           │
                                │                                    ytmusicapi + yt-dlp
                                │                                           │
                                │           ┌──────────────────────────────┐
-                               └──────────►│  YouTube Music API            │
+                               └──────────►│  YouTube Music API           │
                                HTTP        └──────────────────────────────┘
                                127.0.0.1:50052
                           (built-in web UI)
