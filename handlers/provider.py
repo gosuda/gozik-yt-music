@@ -35,7 +35,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import grpc
 import ytmusicapi
@@ -490,14 +490,22 @@ def _write_netscape_cookie_file(cookie_str: str) -> str:
     return path
 
 
-def _resolve_stream_url(video_id: str, quality: int) -> tuple[str, dict[str, str], int]:
-    """Extract a direct audio stream URL for the given YouTube Music video ID.
+def _resolve_stream_url(video_id: str, quality: int) -> Tuple[str, Dict[str, str], int, Dict[str, Any]]:
+    """Extract a direct audio stream URL and metadata for a YouTube Music video ID.
 
     Authentication fallback for yt-dlp:
         1. Browser cookie string from _AUTH_FILE (written to a temporary
            Netscape cookiefile and passed via yt-dlp's cookiefile option).
         2. Stored User-Agent from _AUTH_FILE (passed via http_headers).
         3. Unauthenticated if no cookies are stored.
+
+    Returns:
+        A 4-tuple of (stream_url, headers, expiry_ms, stream_info).
+        stream_info contains keys useful for resume/seek:
+            - abr: average bitrate in kbps (float or int)
+            - duration: duration in seconds (float)
+            - filesize: total file size in bytes (int), when known
+            - format_id: yt-dlp format identifier (str)
 
     Raises:
         RuntimeError: with actionable remediation advice on every failure path.
@@ -582,11 +590,34 @@ def _resolve_stream_url(video_id: str, quality: int) -> tuple[str, dict[str, str
                 "Fallback: public search is still available without streaming."
             )
 
+        formats = info.get("formats", []) or []
+        selected_format: Optional[Dict[str, Any]] = None
+
+        # Prefer the URL yt-dlp selected for the requested format.
         stream_url: str = info.get("url", "")
-        if not stream_url:
-            formats = info.get("formats", [])
-            if formats:
-                stream_url = formats[-1].get("url", "")
+        if stream_url:
+            # Try to find the matching format entry for metadata.
+            format_id = info.get("format_id")
+            if format_id:
+                for fmt in formats:
+                    if fmt.get("format_id") == format_id:
+                        selected_format = fmt
+                        break
+            if selected_format is None:
+                selected_format = {
+                    "url": stream_url,
+                    "format_id": format_id,
+                }
+        elif formats:
+            # Fallback: use the best audio-only format, not formats[-1]
+            # which could be a video-only track.
+            for fmt in reversed(formats):
+                if fmt.get("acodec") != "none" and fmt.get("vcodec") == "none":
+                    selected_format = fmt
+                    break
+            if selected_format is None:
+                selected_format = formats[-1]
+            stream_url = selected_format.get("url", "")
 
         if not stream_url:
             raise RuntimeError(
@@ -596,11 +627,20 @@ def _resolve_stream_url(video_id: str, quality: int) -> tuple[str, dict[str, str
                 "Fallback: public search is still available without streaming."
             )
 
-        http_headers: dict[str, str] = info.get("http_headers", {})
+        http_headers: Dict[str, str] = info.get("http_headers", {})
         headers = {key: str(value) for key, value in http_headers.items()}
         expiry_ms = int((time.time() + 6 * 3600) * 1000)
 
-        return stream_url, headers, expiry_ms
+        stream_info: Dict[str, Any] = {
+            "format_id": selected_format.get("format_id", ""),
+            "ext": selected_format.get("ext", info.get("ext", "")),
+            "abr": selected_format.get("abr") or info.get("abr", 0),
+            "duration": selected_format.get("duration") or info.get("duration", 0),
+            "filesize": selected_format.get("filesize") or info.get("filesize", 0),
+            "filesize_approx": selected_format.get("filesize_approx") or info.get("filesize_approx", 0),
+        }
+
+        return stream_url, headers, expiry_ms, stream_info
     finally:
         if cookie_path and os.path.exists(cookie_path):
             try:
@@ -1541,7 +1581,7 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         logger.info("ResolveStream: video_id=%s quality=%d", video_id, quality)
 
         try:
-            stream_url, headers, expiry_ms = _resolve_stream_url(video_id, quality)
+            stream_url, headers, expiry_ms, _ = _resolve_stream_url(video_id, quality)
         except RuntimeError as exc:
             logger.error("ResolveStream failed for %s: %s", video_id, exc)
             context.abort(grpc.StatusCode.INTERNAL, str(exc))
@@ -1573,7 +1613,13 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         request: pb.StreamAudioRequest,
         context: grpc.ServicerContext,
     ) -> Iterator[pb.AudioChunk]:
-        """Stream raw audio bytes for a track directly over gRPC."""
+        """Stream raw audio bytes for a track directly over gRPC.
+
+        Supports HTTP Range requests based on ``start_position_ms`` and will
+        reconnect/resume on transient connection drops. This prevents the
+        duplicated-intro bug that occurs when ``start_position_ms`` is ignored
+        and the truncated-playback bug caused by mid-stream connection resets.
+        """
         video_id = request.track_id.strip()
         if not video_id:
             context.abort(
@@ -1594,29 +1640,142 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         )
 
         chunk_size = 64 * 1024
+        max_retries = 3
+        base_delay = 1.0
 
         try:
+            import http.client
+            import urllib.error
             import urllib.request
 
-            stream_url, headers, _ = _resolve_stream_url(video_id, quality)
-            req = urllib.request.Request(stream_url, headers=headers)
+            stream_url, headers, _, stream_info = _resolve_stream_url(video_id, quality)
 
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                timestamp_ms = start_ms
+            # Determine bitrate so we can convert between time and byte offsets.
+            bitrate_kbps: float = stream_info.get("abr") or 0
+            if not bitrate_kbps and stream_info.get("duration") and stream_info.get("filesize"):
+                bitrate_kbps = stream_info["filesize"] * 8 / stream_info["duration"] / 1000
+            if not bitrate_kbps and stream_info.get("duration") and stream_info.get("filesize_approx"):
+                bitrate_kbps = stream_info["filesize_approx"] * 8 / stream_info["duration"] / 1000
+            if not bitrate_kbps:
+                bitrate_kbps = 128.0  # conservative fallback
 
-                while True:
-                    if not context.is_active():
-                        logger.debug("StreamAudio: client closed stream for %s", video_id)
-                        return
+            # byte_offset is the absolute byte position in the full media file.
+            # bytes_streamed is how many bytes we have successfully delivered to
+            # the client since start_ms.
+            byte_offset = int(start_ms * bitrate_kbps / 8)
+            bytes_streamed = 0
+            timestamp_ms = start_ms
 
-                    chunk = resp.read(chunk_size)
-                    if not chunk:
-                        yield pb.AudioChunk(data=b"", timestamp_ms=timestamp_ms, eof=True)
-                        logger.info("StreamAudio: finished streaming %s", video_id)
-                        return
+            for attempt in range(max_retries + 1):
+                if not context.is_active():
+                    logger.debug("StreamAudio: client closed stream for %s", video_id)
+                    return
 
-                    yield pb.AudioChunk(data=chunk, timestamp_ms=timestamp_ms, eof=False)
-                    timestamp_ms += int(len(chunk) / 16)
+                if attempt > 0:
+                    logger.info(
+                        "StreamAudio: reconnect attempt %d/%d for %s at byte %d",
+                        attempt,
+                        max_retries,
+                        video_id,
+                        byte_offset,
+                    )
+                    try:
+                        stream_url, headers, _, stream_info = _resolve_stream_url(
+                            video_id, quality
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "StreamAudio: failed to re-resolve URL for %s on reconnect: %s",
+                            video_id,
+                            exc,
+                        )
+                    delay = min(base_delay * (2 ** (attempt - 1)), 10.0)
+                    time.sleep(delay)
+
+                req = urllib.request.Request(stream_url, headers=headers)
+                if byte_offset > 0:
+                    req.add_header("Range", f"bytes={byte_offset}-")
+                    logger.debug(
+                        "StreamAudio: requesting Range bytes=%d- for %s",
+                        byte_offset,
+                        video_id,
+                    )
+
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        if byte_offset > 0 and resp.status != 206:
+                            logger.error(
+                                "StreamAudio: server ignored Range request for %s "
+                                "(status=%d). Resuming from byte 0 would duplicate "
+                                "already-played audio; aborting stream.",
+                                video_id,
+                                resp.status,
+                            )
+                            context.abort(
+                                grpc.StatusCode.INTERNAL,
+                                "What failed: stream resume is not supported by the "
+                                "remote server (Range request was ignored). "
+                                "How to fix: start playback from the beginning.",
+                            )
+                            return
+
+                        while True:
+                            if not context.is_active():
+                                logger.debug(
+                                    "StreamAudio: client closed stream for %s", video_id
+                                )
+                                return
+
+                            chunk = resp.read(chunk_size)
+                            if not chunk:
+                                yield pb.AudioChunk(
+                                    data=b"", timestamp_ms=timestamp_ms, eof=True
+                                )
+                                logger.info(
+                                    "StreamAudio: finished streaming %s "
+                                    "(bytes_streamed=%d, timestamp_ms=%d)",
+                                    video_id,
+                                    bytes_streamed,
+                                    timestamp_ms,
+                                )
+                                return
+
+                            yield pb.AudioChunk(
+                                data=chunk, timestamp_ms=timestamp_ms, eof=False
+                            )
+                            chunk_len = len(chunk)
+                            bytes_streamed += chunk_len
+                            byte_offset += chunk_len
+                            timestamp_ms = start_ms + int(
+                                bytes_streamed * 8 / bitrate_kbps
+                            )
+
+                except urllib.error.HTTPError as exc:
+                    if exc.code == 416 and attempt < max_retries:
+                        logger.warning(
+                            "StreamAudio: Range not satisfiable for %s; "
+                            "resetting to byte 0 and retrying",
+                            video_id,
+                        )
+                        byte_offset = 0
+                        bytes_streamed = 0
+                        timestamp_ms = start_ms
+                        continue
+                    raise
+                except (ConnectionResetError, urllib.error.URLError, OSError, http.client.IncompleteRead, http.client.HTTPException) as exc:
+                    if attempt < max_retries:
+                        logger.warning(
+                            "StreamAudio: connection error for %s at byte %d "
+                            "(attempt %d/%d): %s",
+                            video_id,
+                            byte_offset,
+                            attempt + 1,
+                            max_retries + 1,
+                            exc,
+                        )
+                        continue
+                    raise
+
         except RuntimeError as exc:
             logger.error("StreamAudio error for %s: %s", video_id, exc)
             context.abort(grpc.StatusCode.INTERNAL, str(exc))
