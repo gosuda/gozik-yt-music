@@ -3,7 +3,7 @@ name: Build and Release
 on:
   push:
     tags:
-      - 'plugin-v*'
+      - 'v*'
   workflow_dispatch:
 
 jobs:
@@ -306,7 +306,7 @@ jobs:
       - build-macos-arm64
       - build-windows-amd64
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/plugin-v')
+    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:

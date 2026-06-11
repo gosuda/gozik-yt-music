@@ -448,7 +448,7 @@ The script reads protos from `../gozik/api/music/v1/`, writes stubs to `generate
 
 ## CI / Packaging workflow
 
-The GitHub Actions workflow at `.github/workflows/build.yml` builds release artefacts for all platforms on every `plugin-v*` tag push.
+The GitHub Actions workflow at `.github/workflows/build.yml` builds release artefacts for all platforms on every `v*` tag push.
 
 | Platform | Runner | Build tool | Package format |
 |---|---|---|---|
@@ -464,8 +464,8 @@ The GitHub Actions workflow at `.github/workflows/build.yml` builds release arte
 To publish a release:
 
 ```bash
-git tag plugin-v1.0.0
-git push origin plugin-v1.0.0
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
 ---
