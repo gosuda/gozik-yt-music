@@ -457,7 +457,7 @@ The GitHub Actions workflow at `.github/workflows/build.yml` builds release arte
 | Linux RISCV64 | `ubuntu-latest` + QEMU (riscv64) | PyInstaller in container | `.tar.gz` |
 | macOS ARM64 | `macos-latest` (M1) | PyInstaller | `.tar.gz` |
 | Windows AMD64 | `windows-latest` | PyInstaller | `.zip` |
-| Windows ARM64 | `windows-11-arm` | PyInstaller | `.zip` |
+| Windows ARM64 | — (use AMD64 build) | — | `.zip` (x64 emulation) |
 
 To publish a release:
 
