@@ -117,7 +117,17 @@ fi
 JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 CERTIFI_PEM="$("${PYTHON}" -c 'import certifi; print(certifi.where())')"
 
+BUILD_OS_RAW="$(uname -s | tr '[:upper:]' '[:lower:]')"
+BUILD_ARCH_RAW="$(uname -m)"
+case "${BUILD_ARCH_RAW}" in
+    amd64) BUILD_ARCH="x86_64" ;;
+    aarch64) BUILD_ARCH="arm64" ;;
+    *) BUILD_ARCH="${BUILD_ARCH_RAW}" ;;
+esac
+PLATFORM="${BUILD_OS_RAW}-${BUILD_ARCH}"
+
 log_info "Parallel jobs  : ${JOBS}"
+log_info "Platform       : ${PLATFORM}"
 log_info "certifi bundle : ${CERTIFI_PEM}"
 
 # ---------------------------------------------------------------------------
@@ -150,17 +160,30 @@ cp "${CERTIFI_PEM}" certifi/cacert.pem
 # ---------------------------------------------------------------------------
 # Download Node.js standalone binary for yt-dlp JS challenges
 # ---------------------------------------------------------------------------
-NODE_URL="https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz"
-if [[ ! -x "${SCRIPT_DIR}/.tools/bin/node" ]]; then
-    log_step "Downloading Node.js standalone binary"
-    mkdir -p "${SCRIPT_DIR}/.tools"
-    if curl -fsSL "${NODE_URL}" | tar -xJ --strip-components=1 -C "${SCRIPT_DIR}/.tools"; then
-        log_ok "Node.js downloaded to ${SCRIPT_DIR}/.tools"
+NODE_OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+NODE_ARCH="$(uname -m)"
+case "${NODE_ARCH}" in
+    x86_64|amd64) NODE_ARCH="x64" ;;
+    aarch64|arm64) NODE_ARCH="arm64" ;;
+    *)
+        log_warn "Unsupported architecture: ${NODE_ARCH} — Node.js download skipped"
+        NODE_URL=""
+        ;;
+esac
+
+if [[ -n "${NODE_URL}" ]]; then
+    NODE_URL="https://nodejs.org/dist/v22.14.0/node-v22.14.0-${NODE_OS}-${NODE_ARCH}.tar.xz"
+    if [[ ! -x "${SCRIPT_DIR}/.tools/bin/node" ]]; then
+        log_step "Downloading Node.js standalone binary (${NODE_OS}-${NODE_ARCH})"
+        mkdir -p "${SCRIPT_DIR}/.tools"
+        if curl -fsSL "${NODE_URL}" | tar -xJ --strip-components=1 -C "${SCRIPT_DIR}/.tools"; then
+            log_ok "Node.js downloaded to ${SCRIPT_DIR}/.tools"
+        else
+            log_warn "Node.js download failed — yt-dlp may not be able to solve JS challenges"
+        fi
     else
-        log_warn "Node.js download failed — yt-dlp may not be able to solve JS challenges"
+        log_info "Node.js already present at ${SCRIPT_DIR}/.tools/bin/node"
     fi
-else
-    log_info "Node.js already present at ${SCRIPT_DIR}/.tools/bin/node"
 fi
 
 # ---------------------------------------------------------------------------
@@ -272,7 +295,7 @@ cat > "${BUILD_MANIFEST}" <<MANIFEST
     "output_path": "dist/${BINARY_NAME}/${BINARY_NAME}",
     "output_directory": "dist/${BINARY_NAME}",
     "format": "pyinstaller-onedir",
-    "platform": "linux-x86_64",
+    "platform": "${PLATFORM}",
     "note": "Self-contained directory produced by PyInstaller. Bundles the Python interpreter, bytecode, extension modules, and data files without translating Python to C."
   },
   "toolchain": {

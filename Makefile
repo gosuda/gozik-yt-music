@@ -65,12 +65,18 @@ codegen:
 # -----------------------------------------------------------------------------
 # Development target: ensure venv + deps, then run server.py directly
 # -----------------------------------------------------------------------------
-_NODE_URL := https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz
-
 .download-node:
-	@if [ ! -x ".tools/bin/node" ]; then \
-		echo "==> Downloading Node.js standalone binary ..."; \
-		mkdir -p .tools && curl -fsSL "$(_NODE_URL)" | tar -xJ --strip-components=1 -C .tools; \
+	@NODE_OS=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
+	NODE_ARCH=$$(uname -m); \
+	case "$$NODE_ARCH" in \
+		x86_64|amd64) NODE_ARCH="x64" ;; \
+		aarch64|arm64) NODE_ARCH="arm64" ;; \
+		*) echo "Unsupported architecture: $$NODE_ARCH" >&2; exit 1 ;; \
+	esac; \
+	NODE_URL="https://nodejs.org/dist/v22.14.0/node-v22.14.0-$${NODE_OS}-$${NODE_ARCH}.tar.xz"; \
+	if [ ! -x ".tools/bin/node" ]; then \
+		echo "==> Downloading Node.js standalone binary ($${NODE_OS}-$${NODE_ARCH}) ..."; \
+		mkdir -p .tools && curl -fsSL "$${NODE_URL}" | tar -xJ --strip-components=1 -C .tools; \
 	fi
 
 dev: .download-node
