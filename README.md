@@ -125,6 +125,65 @@ python3 server.py
 
 ---
 
+### Option B — Install prebuilt release (user-only)
+
+No root access required. The extracted bundle runs in-place from your home directory.
+
+1. Download the release archive matching your platform from the [Releases](https://github.com/gg582/gozik-yt-music/releases) page.
+2. Extract the archive:
+
+```bash
+tar xf <release-archive> -C ~/.local/share
+```
+
+3. Create a user systemd unit:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/gozik-yt-music-server.service <<'EOF'
+[Unit]
+Description=gozik YouTube Music gRPC plugin server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/gozik-yt-music-server/gozik-yt-music-server
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+EOF
+```
+
+4. Enable and start the service:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now gozik-yt-music-server
+```
+
+**Status & logs**
+
+```bash
+systemctl --user status gozik-yt-music-server
+journalctl --user -u gozik-yt-music-server -f
+```
+
+**Uninstall**
+
+```bash
+systemctl --user stop gozik-yt-music-server
+systemctl --user disable gozik-yt-music-server
+rm ~/.config/systemd/user/gozik-yt-music-server.service
+systemctl --user daemon-reload
+rm -rf ~/.local/share/gozik-yt-music-server
+```
+
+---
+
 ### Option C — Build a release binary locally
 
 **Quick install (Makefile)** — build and install in one go:
