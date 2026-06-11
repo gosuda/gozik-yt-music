@@ -79,66 +79,70 @@ jobs:
           path: dist/gozik-yt-music-server-linux-amd64.tar.gz
 
   build-linux-arm64:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - uses: uraimo/run-on-arch-action@v2
-        name: Build in ARM64 container
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          arch: aarch64
-          distro: ubuntu_latest
-          dockerRunArgs: |
-            --volume "${PWD}:/workspace"
-          run: |
-            cd /workspace
-            apt-get update -q && apt-get install -y -q python3-venv python3-pip curl
-            python3 -m venv .venv
-            .venv/bin/pip install -q -r requirements.txt pyinstaller
-            mkdir -p .tools
-            curl -fsSL https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-arm64.tar.xz | tar -xJ --strip-components=1 -C .tools
-            mkdir -p certifi
-            cp "$(.venv/bin/python -c 'import certifi; print(certifi.where())')" certifi/cacert.pem
-            .venv/bin/pyinstaller server.py \
-              --name=gozik-yt-music-server \
-              --onedir \
-              --distpath=dist \
-              --workpath=build \
-              --hidden-import=ytmusicapi \
-              --hidden-import=grpc \
-              --hidden-import=grpc._cython \
-              --hidden-import=grpc._cython.cygrpc \
-              --hidden-import=google.protobuf \
-              --hidden-import=google.protobuf.internal \
-              --hidden-import=yt_dlp \
-              --hidden-import=yt_dlp.extractor \
-              --hidden-import=yt_dlp.extractor.youtubetab \
-              --hidden-import=yt_dlp.extractor.youtube \
-              --hidden-import=requests \
-              --hidden-import=certifi \
-              --hidden-import=charset_normalizer \
-              --hidden-import=idna \
-              --hidden-import=urllib3 \
-              --hidden-import=generated \
-              --hidden-import=handlers \
-              --collect-all=ytmusicapi \
-              --collect-all=grpc \
-              --collect-all=google.protobuf \
-              --collect-all=yt_dlp \
-              --collect-all=certifi \
-              --add-data=generated:generated \
-              --add-data=certifi/cacert.pem:certifi \
-              --add-binary=.tools/bin/node:. \
-              --exclude-module=tkinter \
-              --exclude-module=unittest \
-              --exclude-module=test \
-              --exclude-module=grpc_tools \
-              --exclude-module=lib2to3 \
-              --exclude-module=pydoc \
-              --exclude-module=doctest \
-              --noconfirm \
-              --clean
-            cd dist
-            tar czf gozik-yt-music-server-linux-arm64.tar.gz gozik-yt-music-server
+          python-version: '3.13'
+      - name: Install dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -r requirements.txt pyinstaller
+      - name: Download Node.js
+        run: |
+          mkdir -p .tools
+          curl -fsSL https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-arm64.tar.xz | tar -xJ --strip-components=1 -C .tools
+      - name: Prepare certifi
+        run: |
+          mkdir -p certifi
+          cp "$(.venv/bin/python -c 'import certifi; print(certifi.where())')" certifi/cacert.pem
+      - name: Build with PyInstaller
+        run: |
+          .venv/bin/pyinstaller server.py \
+            --name=gozik-yt-music-server \
+            --onedir \
+            --distpath=dist \
+            --workpath=build \
+            --hidden-import=ytmusicapi \
+            --hidden-import=grpc \
+            --hidden-import=grpc._cython \
+            --hidden-import=grpc._cython.cygrpc \
+            --hidden-import=google.protobuf \
+            --hidden-import=google.protobuf.internal \
+            --hidden-import=yt_dlp \
+            --hidden-import=yt_dlp.extractor \
+            --hidden-import=yt_dlp.extractor.youtubetab \
+            --hidden-import=yt_dlp.extractor.youtube \
+            --hidden-import=requests \
+            --hidden-import=certifi \
+            --hidden-import=charset_normalizer \
+            --hidden-import=idna \
+            --hidden-import=urllib3 \
+            --hidden-import=generated \
+            --hidden-import=handlers \
+            --collect-all=ytmusicapi \
+            --collect-all=grpc \
+            --collect-all=google.protobuf \
+            --collect-all=yt_dlp \
+            --collect-all=certifi \
+            --add-data=generated:generated \
+            --add-data=certifi/cacert.pem:certifi \
+            --add-binary=.tools/bin/node:. \
+            --exclude-module=tkinter \
+            --exclude-module=unittest \
+            --exclude-module=test \
+            --exclude-module=grpc_tools \
+            --exclude-module=lib2to3 \
+            --exclude-module=pydoc \
+            --exclude-module=doctest \
+            --noconfirm \
+            --clean
+      - name: Package
+        run: |
+          cd dist
+          tar czf gozik-yt-music-server-linux-arm64.tar.gz gozik-yt-music-server
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -153,7 +157,8 @@ jobs:
         name: Build in RISC-V64 container
         with:
           arch: riscv64
-          distro: ubuntu_latest
+          distro: ubuntu22.04
+          githubToken: ${{ github.token }}
           dockerRunArgs: |
             --volume "${PWD}:/workspace"
           run: |

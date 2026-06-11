@@ -453,11 +453,13 @@ The GitHub Actions workflow at `.github/workflows/build.yml` builds release arte
 | Platform | Runner | Build tool | Package format |
 |---|---|---|---|
 | Linux AMD64 | `ubuntu-latest` | PyInstaller | `.tar.gz` |
-| Linux ARM64 | `ubuntu-latest` + QEMU (aarch64) | PyInstaller in container | `.tar.gz` |
+| Linux ARM64 | `ubuntu-24.04-arm` (native) | PyInstaller | `.tar.gz` |
 | Linux RISCV64 | `ubuntu-latest` + QEMU (riscv64) | PyInstaller in container | `.tar.gz` |
 | macOS ARM64 | `macos-latest` (M1) | PyInstaller | `.tar.gz` |
 | Windows AMD64 | `windows-latest` | PyInstaller | `.zip` |
 | Windows ARM64 | — (use AMD64 build) | — | `.zip` (x64 emulation) |
+
+> **Note on RISC-V builds:** GitHub does not provide native RISC-V runners, so the RISC-V64 artefact is built inside an emulated container via QEMU. This makes the build significantly slower than other platforms and it can occasionally fail due to QEMU or Docker infrastructure flakiness. If a RISC-V release is missing, please open an issue or retry the workflow.
 
 To publish a release:
 
