@@ -68,7 +68,7 @@ gozik-yt-music/
 │   ├── provider_link_pb2.py
 │   └── provider_link_pb2_grpc.py
 ├── codegen.sh             # Compile .proto → generated/ stubs
-├── package.sh             # Nuitka AOT compilation → dist/gozik-yt-music-server
+├── package.sh             # PyInstaller onedir build → dist/gozik-yt-music-server
 ├── requirements.txt       # Pinned Python dependencies
 ├── build_manifest.json    # Build configuration and post-build metadata tracker
 └── .gitignore
@@ -160,11 +160,8 @@ bash codegen.sh
 # Release build (binary written to dist/gozik-yt-music-server)
 bash package.sh
 
-# Debug build — retains intermediate C sources in the .build/ directory
+# Debug build — PyInstaller debug traces enabled
 bash package.sh --debug
-
-# Disable ccache
-bash package.sh --no-ccache
 ```
 
 **Makefile targets**
@@ -392,16 +389,16 @@ The script reads protos from `../gozik/api/music/v1/`, writes stubs to `generate
 
 ## CI / Packaging workflow
 
-The GitHub Actions workflow at [`.github/workflows/package-plugins.yml`](../.github/workflows/package-plugins.yml) (inside the `gozik` repository) builds release artefacts for all platforms on every `plugin-v*` tag push.
+The GitHub Actions workflow at `.github/workflows/build.yml` builds release artefacts for all platforms on every `plugin-v*` tag push.
 
-| Platform | Runner | Compilation | Packaging |
+| Platform | Runner | Build tool | Package format |
 |---|---|---|---|
-| Linux AMD64 | `ubuntu-latest` | Nuitka native | appimagetool |
-| Linux ARM64 | `ubuntu-latest` + QEMU (aarch64) | Nuitka native in container | appimagetool |
-| Linux RISCV64 | `ubuntu-latest` + QEMU (riscv64) | Nuitka native in container | appimagetool |
-| macOS ARM64 | `macos-latest` (M1) | Nuitka native | create-dmg |
-| Windows AMD64 | `windows-latest` | Nuitka native | Inno Setup 6 + NSSM |
-| Windows ARM64 | `windows-11-arm` | Nuitka native | Inno Setup 6 + NSSM |
+| Linux AMD64 | `ubuntu-latest` | PyInstaller | `.tar.gz` |
+| Linux ARM64 | `ubuntu-latest` + QEMU (aarch64) | PyInstaller in container | `.tar.gz` |
+| Linux RISCV64 | `ubuntu-latest` + QEMU (riscv64) | PyInstaller in container | `.tar.gz` |
+| macOS ARM64 | `macos-latest` (M1) | PyInstaller | `.tar.gz` |
+| Windows AMD64 | `windows-latest` | PyInstaller | `.zip` |
+| Windows ARM64 | `windows-11-arm` | PyInstaller | `.zip` |
 
 To publish a release:
 
@@ -420,7 +417,7 @@ git push origin plugin-v1.0.0
 | `grpcio-tools` | 1.81.0 | Proto compilation (`codegen.sh`) |
 | `ytmusicapi` | 1.10.2 | YouTube Music API client |
 | `yt-dlp` | 2025.1.26 | Audio stream URL extraction |
-| `nuitka` | 4.1.2 | AOT Python → C compilation |
+| `pyinstaller` | 6.x | Python application bundler |
 
 ---
 
