@@ -1,8 +1,8 @@
 {
   "_schema_version": "1.1",
   "_comment": "Build configuration tracker for gozik-yt-music. Auto-updated by package.sh.",
-  "build_timestamp": "2026-06-10T15:28:39Z",
-  "git_commit": "9199f87",
+  "build_timestamp": "2026-06-11T05:48:11Z",
+  "git_commit": "0bdfbd4",
   "build_host": "elegant",
   "build_os": "Linux 7.1.0-mountain-rc6+ x86_64",
   "project": {
@@ -39,8 +39,8 @@
   "pinned_dependencies": {
     "grpcio": "1.81.0",
     "grpcio-tools": "1.81.0",
-    "ytmusicapi": "1.10.2",
-    "yt-dlp": "2026.06.09.230517",
+    "ytmusicapi": "1.12.1",
+    "yt-dlp": "2026.06.10.235405",
     "yt-dlp_pinned_in_requirements": "2025.1.26",
     "protobuf_runtime": "6.33.6",
     "pyinstaller": "6.20.0"
@@ -89,8 +89,8 @@
     "estimated_bundle_size": "~150-250 MB"
   },
   "post_build": {
-    "bundle_size_bytes": 83489169,
-    "sha256": "948a49cc222e74c691d6d0250792f070113eb0ad6d9e19658b1ac8978ece48c3",
+    "bundle_size_bytes": 203737086,
+    "sha256": "c1d69c916ebb01f73e9ae3fabba3629ba641d94e464f5414a6518139d67e5b0b",
     "build_duration_seconds": 15,
     "note": "Populated by package.sh post-build pass."
   }
