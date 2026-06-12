@@ -162,12 +162,12 @@ cp "${CERTIFI_PEM}" certifi/cacert.pem
 # ---------------------------------------------------------------------------
 NODE_OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 NODE_ARCH="$(uname -m)"
+NODE_URL=""
 case "${NODE_ARCH}" in
     x86_64|amd64) NODE_ARCH="x64" ;;
     aarch64|arm64) NODE_ARCH="arm64" ;;
     *)
         log_warn "Unsupported architecture: ${NODE_ARCH} — Node.js download skipped"
-        NODE_URL=""
         ;;
 esac
 
