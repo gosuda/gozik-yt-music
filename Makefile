@@ -53,6 +53,10 @@ all: build
 # (Automatically pulls the latest yt-dlp nightly; set YTDLP_SKIP_NIGHTLY=1 to skip.)
 # -----------------------------------------------------------------------------
 build:
+	@echo "==> Linking Node.js to .tools/bin..."
+	mkdir -p .tools/bin
+	ln -s $(which node) .tools/bin/node
+
 	@echo "==> Building $(BINARY_NAME) ..."
 	bash package.sh
 
