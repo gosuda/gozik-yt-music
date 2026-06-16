@@ -1,6 +1,6 @@
 # gozik-yt-music
 
-YouTube Music plugin server for the [gozik](https://github.com/gg582/gozik) desktop music player.
+YouTube Music plugin server for the [gozik](https://github.com/gosuda/gozik) desktop music player.
 
 Implemented as a standalone background gRPC daemon that the gozik Go frontend connects to over localhost. Built with [ytmusicapi](https://github.com/sigma67/ytmusicapi) and PyInstaller
 
@@ -96,8 +96,8 @@ make install-user
 
 ```bash
 # 1. Clone both repositories as siblings
-git clone https://github.com/gg582/gozik.git
-git clone https://github.com/gg582/gozik-yt-music.git
+git clone https://github.com/gosuda/gozik.git
+git clone https://github.com/gosuda/gozik-yt-music.git
 
 # Directory layout must be:
 #   workspace/
@@ -129,7 +129,7 @@ python3 server.py
 
 No root access required. The extracted bundle runs in-place from your home directory.
 
-1. Download the release archive matching your platform from the [Releases](https://github.com/gg582/gozik-yt-music/releases) page.
+1. Download the release archive matching your platform from the [Releases](https://github.com/gosuda/gozik-yt-music/releases) page.
 2. Extract the archive:
 
 ```bash
