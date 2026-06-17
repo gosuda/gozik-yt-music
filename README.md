@@ -223,6 +223,25 @@ bash package.sh
 bash package.sh --debug
 ```
 
+---
+
+### Option D — GUI installer (cross-platform)
+
+A Fyne-based graphical installer is available for Linux, macOS, and Windows. It downloads a portable Python runtime, the source code, Node.js, and builds the `gozik-yt-music-server` bundle locally under your user profile — no administrator rights required.
+
+1. Download the installer for your platform from the [Releases](https://github.com/gosuda/gozik-yt-music/releases) page:
+   - Linux: `gozik-yt-music-installer-linux-amd64` (or `-arm64`)
+   - macOS: `gozik-yt-music-installer-darwin-arm64`
+   - Windows: `gozik-yt-music-installer-windows-amd64.exe`
+2. Run the installer.
+3. Follow the wizard: accept the license, pick a version/tag and install directory, then wait for the build to finish.
+4. The installer registers a user-level autostart entry and can create an application menu shortcut.
+
+```bash
+# Install a specific release from the command line
+gozik-yt-music-installer --tag v1.2.3
+```
+
 **Makefile targets**
 
 | Target | Description |
@@ -448,7 +467,7 @@ The script reads protos from `../gozik/api/music/v1/`, writes stubs to `generate
 
 ## CI / Packaging workflow
 
-The GitHub Actions workflow at `.github/workflows/build.yml` builds release artefacts for all platforms on every `v*` tag push.
+The GitHub Actions workflow at `.github/workflows/build.yml` builds release artefacts for all platforms on every `v*` tag push. It also builds and uploads the GUI installer binaries for Linux, macOS, and Windows.
 
 | Platform | Runner | Build tool | Package format |
 |---|---|---|---|
@@ -458,6 +477,13 @@ The GitHub Actions workflow at `.github/workflows/build.yml` builds release arte
 | macOS ARM64 | `macos-latest` (M1) | PyInstaller | `.tar.gz` |
 | Windows AMD64 | `windows-latest` | PyInstaller | `.zip` |
 | Windows ARM64 | — (use AMD64 build) | — | `.zip` (x64 emulation) |
+
+| Platform | Runner | Build tool | Artifact |
+|---|---|---|---|
+| Linux AMD64 installer | `ubuntu-latest` | Go + Fyne | `gozik-yt-music-installer-linux-amd64` |
+| Linux ARM64 installer | `ubuntu-24.04-arm` | Go + Fyne | `gozik-yt-music-installer-linux-arm64` |
+| macOS ARM64 installer | `macos-latest` | Go + Fyne | `gozik-yt-music-installer-darwin-arm64` |
+| Windows AMD64 installer | `windows-latest` | Go + Fyne | `gozik-yt-music-installer-windows-amd64.exe` |
 
 > **Note on RISC-V builds:** GitHub does not provide native RISC-V runners, so the RISC-V64 artefact is built inside an emulated container via QEMU. This makes the build significantly slower than other platforms and it can occasionally fail due to QEMU or Docker infrastructure flakiness. If a RISC-V release is missing, please open an issue or retry the workflow.
 

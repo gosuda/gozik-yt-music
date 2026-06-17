@@ -3,11 +3,9 @@ __pycache__/
 *.py[cod]
 *.pyo
 
-# Generated protobuf stubs (produced by codegen.sh — do not commit)
-generated/music_provider_pb2.py
-generated/music_provider_pb2_grpc.py
-generated/provider_link_pb2.py
-generated/provider_link_pb2_grpc.py
+# Generated protobuf stubs are now committed so the source tarball is runnable
+# without the sibling gozik repository. Run `bash codegen.sh` before committing
+# when the .proto definitions change.
 
 # Virtual environment
 .venv/

@@ -298,6 +298,100 @@ jobs:
           name: gozik-yt-music-server-windows-amd64
           path: dist/gozik-yt-music-server-windows-amd64.zip
 
+  build-installer-linux-amd64:
+    name: Build Installer (Linux AMD64)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: installer/go
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      - name: Install Fyne build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgl1-mesa-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
+      - name: Build installer
+        run: go build -ldflags="-s -w" -o gozik-yt-music-installer-linux-amd64 .
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gozik-yt-music-installer-linux-amd64
+          path: installer/go/gozik-yt-music-installer-linux-amd64
+
+  build-installer-linux-arm64:
+    name: Build Installer (Linux ARM64)
+    runs-on: ubuntu-24.04-arm
+    defaults:
+      run:
+        working-directory: installer/go
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      - name: Install Fyne build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgl1-mesa-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
+      - name: Build installer
+        run: go build -ldflags="-s -w" -o gozik-yt-music-installer-linux-arm64 .
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gozik-yt-music-installer-linux-arm64
+          path: installer/go/gozik-yt-music-installer-linux-arm64
+
+  build-installer-macos-arm64:
+    name: Build Installer (macOS ARM64)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: installer/go
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      - name: Build installer
+        env:
+          CGO_ENABLED: 1
+        run: go build -ldflags="-s -w" -o gozik-yt-music-installer-darwin-arm64 .
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gozik-yt-music-installer-darwin-arm64
+          path: installer/go/gozik-yt-music-installer-darwin-arm64
+
+  build-installer-windows-amd64:
+    name: Build Installer (Windows AMD64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: installer/go
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      - name: Install MinGW
+        run: choco install mingw --no-progress
+      - name: Build installer
+        env:
+          CGO_ENABLED: 1
+        run: go build -ldflags="-s -w" -o gozik-yt-music-installer-windows-amd64.exe .
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gozik-yt-music-installer-windows-amd64
+          path: installer/go/gozik-yt-music-installer-windows-amd64.exe
+
   release:
     name: Create GitHub Release
     needs:
@@ -305,6 +399,10 @@ jobs:
       - build-linux-arm64
       - build-macos-arm64
       - build-windows-amd64
+      - build-installer-linux-amd64
+      - build-installer-linux-arm64
+      - build-installer-macos-arm64
+      - build-installer-windows-amd64
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
