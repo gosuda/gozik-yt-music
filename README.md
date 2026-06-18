@@ -11,8 +11,9 @@ Implemented as a standalone background gRPC daemon that the gozik Go frontend co
 ```
 ┌─────────────────────────────────┐        gRPC / loopback
 │  gozik (Go + GTK3 frontend)     │  ──────────────────────►  ┌──────────────────────────────┐
-│  github.com/gosuda/gozik        │  127.0.0.1:50051          │  gozik-yt-music (this repo)  │
-│                                 │  ◄──────────────────────  │  Python 3 + Node.js          │
+│  github.com/gosuda/gozik        │  127.0.0.1:50052          │  gozik-yt-music (this repo)  │
+│  PlayerService on :50051        │  ◄──────────────────────  │  MusicProviderService        │
+│                                 │                           │  Python 3 + Node.js          │
 └─────────────────────────────────┘                           │  MusicProviderService gRPC   │
                                │                              └──────────────────────────────┘
                                │                                           │
@@ -21,7 +22,7 @@ Implemented as a standalone background gRPC daemon that the gozik Go frontend co
                                │           ┌──────────────────────────────┐
                                └──────────►│  YouTube Music API           │
                                HTTP        └──────────────────────────────┘
-                               127.0.0.1:50052
+                               127.0.0.1:50053
                           (built-in web UI)
 ```
 
@@ -37,7 +38,7 @@ The plugin runs as a persistent daemon and is registered as a boot-time service 
 | OAuth2 device-code login | `InitiateAuth` / `CompleteAuth` | Browser-less flow; device URL displayed in the gozik UI or built-in web UI |
 | Browser cookie auth | `CompleteAuth` with `cookie_json` | Paste the JSON exported by ytmusicapi's browser auth helper |
 | Token refresh | `RefreshAuth` | Transparent refresh of OAuth tokens |
-| Built-in web UI | `http.server` on port 50052 | Dark-themed dashboard for auth, status, and logout without the gozik app |
+| Built-in web UI | `http.server` on port 50053 | Dark-themed dashboard for auth, status, and logout without the gozik app |
 | Desktop entry auto-registration | `handlers/desktop_entry.py` | Creates an app-menu shortcut on first startup or first successful auth |
 | Search | `Search` | Songs, albums, artists, playlists |
 | Search | `Search` | Songs, albums, artists, playlists |
@@ -55,7 +56,7 @@ The plugin runs as a persistent daemon and is registered as a boot-time service 
 
 ```
 gozik-yt-music/
-├── server.py              # gRPC server entrypoint (bind 127.0.0.1:50051)
+├── server.py              # gRPC server entrypoint (bind 127.0.0.1:50052)
 ├── handlers/
 │   ├── provider.py        # MusicProviderServiceServicer — all 12 RPCs implemented
 │   ├── webui.py           # Stand-alone HTTP dashboard (port 50052, stdlib only)
@@ -119,7 +120,7 @@ bash codegen.sh
 python3 server.py
 # Options:
 #   --host HOST      Bind address (default: 127.0.0.1)
-#   --port PORT      Bind port    (default: 50051)
+#   --port PORT      Bind port    (default: 50052)
 #   --workers N      gRPC thread-pool size (default: 4)
 ```
 
@@ -337,9 +338,9 @@ Credentials are saved to `~/.config/gozik/ytmusic_auth.json`.
 | Variable | Default | Description |
 |---|---|---|
 | `GOZIK_YTM_HOST` | `127.0.0.1` | Bind host |
-| `GOZIK_YTM_PORT` | `50051` | Bind port |
+| `GOZIK_YTM_PORT` | `50052` | Bind port |
 | `GOZIK_YTM_WORKERS` | `4` | gRPC thread-pool size |
-| `GOZIK_YTM_WEBUI_PORT` | `50052` | Web UI HTTP port (set to `0` to disable) |
+| `GOZIK_YTM_WEBUI_PORT` | `50053` | Web UI HTTP port (set to `0` to disable) |
 | `GOZIK_YTM_REGISTER_DESKTOP` | `auto` | Desktop entry behaviour (`auto`/`always`/`never`) |
 | `XDG_CONFIG_HOME` | `~/.config` | Base directory for credential storage |
 

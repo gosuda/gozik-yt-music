@@ -1,7 +1,7 @@
 """
 server.py — Application entrypoint for the gozik YouTube Music plugin server.
 
-Starts a gRPC server bound to 127.0.0.1:50051. Designed to run as a
+Starts a gRPC server bound to 127.0.0.1:50052. Designed to run as a
 persistent background daemon alongside the gozik desktop player.
 
 Usage:
@@ -53,9 +53,9 @@ logger = logging.getLogger("gozik.ytmusic.server")
 # Constants
 # ---------------------------------------------------------------------------
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 50051
+DEFAULT_PORT = 50052
 DEFAULT_WORKERS = 4
-DEFAULT_WEBUI_PORT = 50052
+DEFAULT_WEBUI_PORT = 50053
 GRACEFUL_SHUTDOWN_TIMEOUT_S = 10
 
 

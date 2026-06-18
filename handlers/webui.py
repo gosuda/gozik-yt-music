@@ -28,7 +28,7 @@ logger = logging.getLogger("gozik.ytmusic.webui")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-DEFAULT_WEBUI_PORT = 50052
+DEFAULT_WEBUI_PORT = 50053
 
 HTML_PAGE = """<!doctype html>
 <html lang="en">

@@ -314,6 +314,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libgl1-mesa-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
+      - name: Test installer
+        run: go test ./...
       - name: Build installer
         run: go build -ldflags="-s -w" -o gozik-yt-music-installer-linux-amd64 .
       - name: Upload installer artifact
@@ -338,6 +340,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libgl1-mesa-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
+      - name: Test installer
+        run: go test ./...
       - name: Build installer
         run: go build -ldflags="-s -w" -o gozik-yt-music-installer-linux-arm64 .
       - name: Upload installer artifact
@@ -358,6 +362,8 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.21'
+      - name: Test installer
+        run: go test ./...
       - name: Build installer
         env:
           CGO_ENABLED: 1
@@ -382,6 +388,8 @@ jobs:
           go-version: '1.21'
       - name: Install MinGW
         run: choco install mingw --no-progress
+      - name: Test installer
+        run: go test ./...
       - name: Build installer
         env:
           CGO_ENABLED: 1

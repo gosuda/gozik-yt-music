@@ -1,16 +1,16 @@
 {
   "_schema_version": "1.1",
   "_comment": "Build configuration tracker for gozik-yt-music. Auto-updated by package.sh.",
-  "build_timestamp": "2026-06-11T05:48:11Z",
-  "git_commit": "0bdfbd4",
-  "build_host": "elegant",
-  "build_os": "Linux 7.1.0-mountain-rc6+ x86_64",
+  "build_timestamp": "2026-06-18T12:07:17Z",
+  "git_commit": "0b3fb0b",
+  "build_host": "fedora",
+  "build_os": "Linux 7.0.12+ aarch64",
   "project": {
     "name": "gozik-yt-music-server",
     "description": "YouTube Music gRPC plugin server for the gozik desktop player",
     "entry_point": "server.py",
     "grpc_service": "MusicProviderService",
-    "bind_address": "127.0.0.1:50051",
+    "bind_address": "127.0.0.1:50052",
     "proto_source": "../gozik/api/music/v1/music_provider.proto"
   },
   "binary": {
@@ -18,13 +18,13 @@
     "output_path": "dist/gozik-yt-music-server/gozik-yt-music-server",
     "output_directory": "dist/gozik-yt-music-server",
     "format": "pyinstaller-onedir",
-    "platform": "linux-x86_64",
+    "platform": "linux-arm64",
     "note": "Self-contained directory produced by PyInstaller. Bundles the Python interpreter, bytecode, extension modules, and data files without translating Python to C."
   },
   "toolchain": {
-    "python_version": "3.13.5",
-    "pyinstaller_version": "6.20.0",
-    "parallel_jobs": 12
+    "python_version": "3.14.5",
+    "pyinstaller_version": "6.21.0",
+    "parallel_jobs": 8
   },
   "pyinstaller_flags_explained": {
     "--onedir": "Produces an application directory instead of a single file. Faster startup and easier debugging than --onefile.",
@@ -40,10 +40,10 @@
     "grpcio": "1.81.0",
     "grpcio-tools": "1.81.0",
     "ytmusicapi": "1.12.1",
-    "yt-dlp": "2026.06.10.235405",
+    "yt-dlp": "2026.06.17.235412",
     "yt-dlp_pinned_in_requirements": "2025.1.26",
     "protobuf_runtime": "6.33.6",
-    "pyinstaller": "6.20.0"
+    "pyinstaller": "6.21.0"
   },
   "included_packages": [
     "ytmusicapi",
@@ -72,7 +72,7 @@
   ],
   "data_files": [
     {
-      "source": "/workspace/gozik-yt-music/.venv/lib/python3.13/site-packages/certifi/cacert.pem",
+      "source": "/home/yjlee/gozik-projects/gozik-yt-music/.venv/lib64/python3.14/site-packages/certifi/cacert.pem",
       "destination": "certifi/cacert.pem",
       "description": "Mozilla CA certificate bundle; required for HTTPS by ytmusicapi and yt-dlp"
     },
@@ -89,9 +89,9 @@
     "estimated_bundle_size": "~150-250 MB"
   },
   "post_build": {
-    "bundle_size_bytes": 203737086,
-    "sha256": "c1d69c916ebb01f73e9ae3fabba3629ba641d94e464f5414a6518139d67e5b0b",
-    "build_duration_seconds": 15,
+    "bundle_size_bytes": 232484001,
+    "sha256": "733c3af09b0b0be12a4a3e8279bb9a4a27893a5fa5b8baa56aa484eaf96c09fd",
+    "build_duration_seconds": 16,
     "note": "Populated by package.sh post-build pass."
   }
 }

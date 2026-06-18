@@ -39,7 +39,7 @@ ICON_NAME := gozik-yt-music.svg
 ICON_SRC := assets/$(ICON_NAME)
 
 PYTHON := .venv/bin/python3
-PIP    := .venv/bin/pip
+PIP    := $(PYTHON) -m pip
 
 .PHONY: all build install install-user uninstall uninstall-user clean distclean codegen dev
 
@@ -52,10 +52,13 @@ all: build
 # Build the standalone application directory via package.sh
 # (Automatically pulls the latest yt-dlp nightly; set YTDLP_SKIP_NIGHTLY=1 to skip.)
 # -----------------------------------------------------------------------------
-build:
-	@echo "==> Linking Node.js to .tools/bin..."
-	mkdir -p .tools/bin
-	ln -s $(which node) .tools/bin/node
+build: .download-node
+	@echo "==> Ensuring Python virtual environment ..."
+	@if [[ ! -x ".venv/bin/python3" ]] || ! .venv/bin/python3 -m pip --version >/dev/null 2>&1; then \
+		rm -rf .venv; \
+		python3 -m venv .venv; \
+	fi
+	$(PIP) install -q -r requirements.txt
 
 	@echo "==> Building $(BINARY_NAME) ..."
 	bash package.sh
@@ -255,7 +258,9 @@ clean:
 	rm -rf certifi/
 	rm -rf *.build/
 	rm -rf *.onefile-build/
-	rm -f *.spec
 	find . -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
 
 distclean: clean
+	rm -rf .venv/
+	rm -rf .tools/
+	rm -rf generated/

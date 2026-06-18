@@ -45,8 +45,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${SCRIPT_DIR}/.venv"
 PYTHON="${VENV_DIR}/bin/python3"
-PIP="${VENV_DIR}/bin/pip"
-PYINSTALLER="${VENV_DIR}/bin/pyinstaller"
+
 OUTPUT_DIR="dist"
 ENTRY_POINT="server.py"
 BINARY_NAME="gozik-yt-music-server"
@@ -88,7 +87,7 @@ log_info "Python : ${PY_VERSION} (${PYTHON})"
 # Install PyInstaller if absent.
 if ! "${PYTHON}" -c "import PyInstaller" 2>/dev/null; then
     log_warn "PyInstaller not found inside venv — installing ..."
-    "${PIP}" install --quiet pyinstaller
+    "${PYTHON}" -m pip install --quiet pyinstaller
 fi
 
 PYINST_VER="$("${PYTHON}" -c 'import PyInstaller; print(PyInstaller.__version__)' 2>/dev/null || echo "unknown")"
@@ -139,7 +138,7 @@ if [[ "${YTDLP_SKIP_NIGHTLY:-0}" == "1" ]]; then
     log_info "YTDLP_SKIP_NIGHTLY=1 — using existing yt-dlp (stable)"
 else
     log_info "Installing latest yt-dlp nightly via pip ..."
-    "${PIP}" install -U --pre yt-dlp
+    "${PYTHON}" -m pip install -U --pre yt-dlp
 fi
 
 YTDLP_ACTUAL_VER="$("${PYTHON}" -c 'import yt_dlp.version; print(yt_dlp.version.__version__)' 2>/dev/null || echo "unknown")"
@@ -287,7 +286,7 @@ cat > "${BUILD_MANIFEST}" <<MANIFEST
     "description": "YouTube Music gRPC plugin server for the gozik desktop player",
     "entry_point": "server.py",
     "grpc_service": "MusicProviderService",
-    "bind_address": "127.0.0.1:50051",
+    "bind_address": "127.0.0.1:50052",
     "proto_source": "../gozik/api/music/v1/music_provider.proto"
   },
   "binary": {
@@ -378,7 +377,7 @@ BUILD_START="$(date +%s)"
 
 # Run PyInstaller from the project root so every path is relative.
 cd "${SCRIPT_DIR}"
-"${PYINSTALLER}" "${PYINST_ARGS[@]}" 2>&1 | tee "${BUILD_LOG}"
+"${PYTHON}" -m PyInstaller "${PYINST_ARGS[@]}" 2>&1 | tee "${BUILD_LOG}"
 
 BUILD_END="$(date +%s)"
 BUILD_DURATION=$(( BUILD_END - BUILD_START ))
@@ -452,5 +451,5 @@ echo "  Duration: ${BUILD_DURATION}s"
 echo "  Manifest: ${BUILD_MANIFEST}"
 echo "  Log     : ${BUILD_LOG}"
 echo ""
-log_info "To start the server:  ${BUNDLE_BINARY} --port 50051"
+log_info "To start the server:  ${BUNDLE_BINARY} --port 50052"
 log_info "To install system-wide:  sudo make install"

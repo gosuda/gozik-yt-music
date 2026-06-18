@@ -85,7 +85,7 @@ def _working_dir() -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def register(webui_port: int = 50052, force: bool = False) -> bool:
+def register(webui_port: int = 50053, force: bool = False) -> bool:
     """Register a desktop entry for the current platform.
 
     Returns *True* if a new entry was written, *False* if it already
@@ -172,7 +172,7 @@ def _unregister_linux() -> bool:
     return removed
 
 
-def install_system_desktop_entry(prefix: str = "/usr/local", webui_port: int = 50052) -> None:
+def install_system_desktop_entry(prefix: str = "/usr/local", webui_port: int = 50053) -> None:
     """Install a system-wide .desktop entry (called by `make install`)."""
     apps_dir = Path(prefix) / "share" / "applications"
     apps_dir.mkdir(parents=True, exist_ok=True)
