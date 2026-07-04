@@ -1,0 +1,14 @@
+[Unit]
+Description=gozik YouTube Music gRPC plugin server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/gozik/ytmusic/gozik-yt-music-server --port 50052
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
