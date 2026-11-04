@@ -127,7 +127,6 @@ func buildBundle(ctx *installContext, log *guiLogger) error {
 		"--hidden-import=google.protobuf.internal",
 		"--hidden-import=yt_dlp",
 		"--hidden-import=yt_dlp.extractor",
-		"--hidden-import=yt_dlp.extractor.youtubetab",
 		"--hidden-import=yt_dlp.extractor.youtube",
 		"--hidden-import=requests",
 		"--hidden-import=certifi",

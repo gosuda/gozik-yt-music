@@ -5,9 +5,9 @@
 #   make && sudo make install
 #   sudo systemctl enable --now gozik-yt-music-server
 #
-# Build automatically fetches the latest yt-dlp nightly before packaging.
-# To skip the nightly update and use the pinned stable version:
-#   YTDLP_SKIP_NIGHTLY=1 make
+# Build uses the yt-dlp version pinned in requirements.txt.
+# To package the latest nightly instead:
+#   YTDLP_NIGHTLY=1 make
 #
 # Development workflow:
 #   make dev                     # create venv, install deps, run server.py
@@ -41,7 +41,7 @@ ICON_SRC := assets/$(ICON_NAME)
 PYTHON := .venv/bin/python3
 PIP    := $(PYTHON) -m pip
 
-.PHONY: all build install install-user uninstall uninstall-user clean distclean codegen dev
+.PHONY: all build install install-user uninstall uninstall-user clean distclean codegen dev test
 
 # -----------------------------------------------------------------------------
 # Default target
@@ -50,7 +50,7 @@ all: build
 
 # -----------------------------------------------------------------------------
 # Build the standalone application directory via package.sh
-# (Automatically pulls the latest yt-dlp nightly; set YTDLP_SKIP_NIGHTLY=1 to skip.)
+# (Uses the pinned yt-dlp unless YTDLP_NIGHTLY=1 is set.)
 # -----------------------------------------------------------------------------
 build: .download-node
 	@echo "==> Ensuring Python virtual environment ..."
@@ -68,6 +68,9 @@ build: .download-node
 # -----------------------------------------------------------------------------
 codegen:
 	bash codegen.sh
+
+test:
+	$(PYTHON) -m unittest discover -s tests -v
 
 # -----------------------------------------------------------------------------
 # Development target: ensure venv + deps, then run server.py directly
@@ -93,8 +96,10 @@ dev: .download-node
 	fi
 	@echo "==> Installing / updating dependencies ..."
 	$(PIP) install -q -r requirements.txt
-	@echo "==> Updating yt-dlp to latest nightly ..."
-	$(PIP) install -q -U --pre yt-dlp
+	@if [ "$(YTDLP_NIGHTLY)" = "1" ]; then \
+		echo "==> Updating yt-dlp to latest nightly ..."; \
+		$(PIP) install -q -U --pre yt-dlp; \
+	fi
 	@echo "==> Generating protobuf stubs ..."
 	PYTHON=$(PYTHON) bash codegen.sh
 	@echo "==> Starting development server ..."

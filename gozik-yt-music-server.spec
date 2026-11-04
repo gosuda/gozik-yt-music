@@ -3,7 +3,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('generated', 'generated'), ('certifi/cacert.pem', 'certifi')]
 binaries = [('.tools/bin/node', '.')]
-hiddenimports = ['ytmusicapi', 'grpc', 'grpc._cython', 'grpc._cython.cygrpc', 'google.protobuf', 'google.protobuf.internal', 'yt_dlp', 'yt_dlp.extractor', 'yt_dlp.extractor.youtubetab', 'yt_dlp.extractor.youtube', 'requests', 'certifi', 'charset_normalizer', 'idna', 'urllib3', 'generated', 'handlers']
+hiddenimports = ['ytmusicapi', 'grpc', 'grpc._cython', 'grpc._cython.cygrpc', 'google.protobuf', 'google.protobuf.internal', 'yt_dlp', 'yt_dlp.extractor', 'yt_dlp.extractor.youtube', 'requests', 'certifi', 'charset_normalizer', 'idna', 'urllib3', 'generated', 'handlers']
 tmp_ret = collect_all('ytmusicapi')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('grpc')

@@ -41,7 +41,6 @@ The plugin runs as a persistent daemon and is registered as a boot-time service 
 | Built-in web UI | `http.server` on port 50053 | Dark-themed dashboard for auth, status, and logout without the gozik app |
 | Desktop entry auto-registration | `handlers/desktop_entry.py` | Creates an app-menu shortcut on first startup or first successful auth |
 | Search | `Search` | Songs, albums, artists, playlists |
-| Search | `Search` | Songs, albums, artists, playlists |
 | Autocomplete | `SearchSuggestions` (streaming) | Real-time suggestions as the user types |
 | Track details | `GetTrackDetails` | Full metadata for a single video ID |
 | Stream URL resolution | `ResolveStream` | Returns a pre-signed audio URL + required headers via yt-dlp |
@@ -503,7 +502,7 @@ git push origin v1.0.0
 |---|---|---|
 | `grpcio` | 1.81.0 | gRPC server runtime |
 | `grpcio-tools` | 1.81.0 | Proto compilation (`codegen.sh`) |
-| `ytmusicapi` | 1.10.2 | YouTube Music API client |
+| `ytmusicapi` | 1.12.1 | YouTube Music API client |
 | `yt-dlp` | 2025.1.26 | Audio stream URL extraction |
 | `pyinstaller` | 6.x | Python application bundler |
 

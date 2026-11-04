@@ -130,15 +130,15 @@ log_info "Platform       : ${PLATFORM}"
 log_info "certifi bundle : ${CERTIFI_PEM}"
 
 # ---------------------------------------------------------------------------
-# Step 2 — Ensure latest yt-dlp nightly
+# Step 2 — Select the yt-dlp version
 # ---------------------------------------------------------------------------
-log_step "Step 2: Updating yt-dlp to latest nightly"
+log_step "Step 2: Selecting yt-dlp version"
 
-if [[ "${YTDLP_SKIP_NIGHTLY:-0}" == "1" ]]; then
-    log_info "YTDLP_SKIP_NIGHTLY=1 — using existing yt-dlp (stable)"
-else
-    log_info "Installing latest yt-dlp nightly via pip ..."
+if [[ "${YTDLP_NIGHTLY:-0}" == "1" ]]; then
+    log_info "YTDLP_NIGHTLY=1 — installing latest yt-dlp nightly via pip ..."
     "${PYTHON}" -m pip install -U --pre yt-dlp
+else
+    log_info "Using yt-dlp pinned in requirements.txt"
 fi
 
 YTDLP_ACTUAL_VER="$("${PYTHON}" -c 'import yt_dlp.version; print(yt_dlp.version.__version__)' 2>/dev/null || echo "unknown")"
@@ -161,16 +161,16 @@ cp "${CERTIFI_PEM}" certifi/cacert.pem
 # ---------------------------------------------------------------------------
 NODE_OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 NODE_ARCH="$(uname -m)"
-NODE_URL=""
 case "${NODE_ARCH}" in
     x86_64|amd64) NODE_ARCH="x64" ;;
     aarch64|arm64) NODE_ARCH="arm64" ;;
     *)
         log_warn "Unsupported architecture: ${NODE_ARCH} — Node.js download skipped"
+        NODE_OS=""
         ;;
 esac
 
-if [[ -n "${NODE_URL}" ]]; then
+if [[ -n "${NODE_OS}" ]]; then
     NODE_URL="https://nodejs.org/dist/v22.14.0/node-v22.14.0-${NODE_OS}-${NODE_ARCH}.tar.xz"
     if [[ ! -x "${SCRIPT_DIR}/.tools/bin/node" ]]; then
         log_step "Downloading Node.js standalone binary (${NODE_OS}-${NODE_ARCH})"
@@ -211,7 +211,6 @@ PYINST_ARGS=(
     "--hidden-import=google.protobuf.internal"
     "--hidden-import=yt_dlp"
     "--hidden-import=yt_dlp.extractor"
-    "--hidden-import=yt_dlp.extractor.youtubetab"
     "--hidden-import=yt_dlp.extractor.youtube"
     "--hidden-import=requests"
     "--hidden-import=certifi"

@@ -440,16 +440,18 @@ def _get_node_path() -> Optional[str]:
     """Return the path to a Node.js binary for yt-dlp JS challenges.
 
     Search order:
-        1. Bundled PyInstaller onedir (same dir as the executable).
+        1. Bundled PyInstaller onedir (executable directory or _internal).
         2. Project-local .tools/bin/node.
         3. Any node in the system PATH.
     """
     # 1. PyInstaller bundle
     if getattr(sys, "frozen", False):
         bundle_dir = Path(sys.executable).parent
-        bundled = bundle_dir / "node"
-        if bundled.exists() and os.access(bundled, os.X_OK):
-            return str(bundled)
+        executable = "node.exe" if os.name == "nt" else "node"
+        for directory in (bundle_dir, bundle_dir / "_internal"):
+            bundled = directory / executable
+            if bundled.exists() and os.access(bundled, os.X_OK):
+                return str(bundled)
 
     # 2. Local download (dev / build prep)
     local_node = Path(__file__).resolve().parent.parent / ".tools" / "bin" / "node"
@@ -694,6 +696,76 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _page_limit(value: int, default: int) -> int:
+    """Return a bounded page size."""
+    if value <= 0:
+        return default
+    return min(value, 100)
+
+
+def _page_offset(token: str, context: grpc.ServicerContext) -> int:
+    """Parse an offset page token or abort the RPC."""
+    if not token:
+        return 0
+    try:
+        offset = int(token)
+        if offset < 0:
+            raise ValueError
+        return offset
+    except ValueError:
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "invalid page_token")
+        raise AssertionError("unreachable")
+
+
+def _paginate(items: List[Any], offset: int, limit: int) -> Tuple[List[Any], str]:
+    """Slice an over-fetched result list and return its next page token."""
+    page = items[offset:offset + limit]
+    next_token = str(offset + limit) if len(items) > offset + limit else ""
+    return page, next_token
+
+
+def _api_status_code(exc: Exception) -> grpc.StatusCode:
+    """Translate upstream HTTP and transport failures to gRPC status codes."""
+    response = getattr(exc, "response", None)
+    http_status = getattr(response, "status_code", None)
+    if http_status == 400:
+        return grpc.StatusCode.INVALID_ARGUMENT
+    if http_status == 401:
+        return grpc.StatusCode.UNAUTHENTICATED
+    if http_status == 403:
+        return grpc.StatusCode.PERMISSION_DENIED
+    if http_status == 404:
+        return grpc.StatusCode.NOT_FOUND
+    if http_status == 429:
+        return grpc.StatusCode.RESOURCE_EXHAUSTED
+    if isinstance(http_status, int) and http_status >= 500:
+        return grpc.StatusCode.UNAVAILABLE
+
+    message = str(exc).lower()
+    if any(text in message for text in ("unauthorized", "authentication", "sign in")):
+        return grpc.StatusCode.UNAUTHENTICATED
+    if "forbidden" in message or "permission" in message:
+        return grpc.StatusCode.PERMISSION_DENIED
+    if "not found" in message:
+        return grpc.StatusCode.NOT_FOUND
+    if "rate limit" in message or "too many requests" in message:
+        return grpc.StatusCode.RESOURCE_EXHAUSTED
+    if isinstance(exc, (TimeoutError, ConnectionError)) or any(
+        text in message for text in ("timeout", "timed out", "connection error", "temporarily unavailable")
+    ):
+        return grpc.StatusCode.UNAVAILABLE
+    return grpc.StatusCode.INTERNAL
+
+
+def _abort_api_error(context: grpc.ServicerContext, action: str, exc: Exception) -> None:
+    """Abort an RPC with an upstream-aware status and actionable message."""
+    context.abort(
+        _api_status_code(exc),
+        f"What failed: {action}: {exc}. "
+        "How to fix: check the request, authentication, and network connection, then try again.",
+    )
 
 
 def _duration_to_ms(duration_str: Optional[str]) -> int:
@@ -1287,9 +1359,8 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         """
         try:
             import yt_dlp
-        except ImportError:
-            logger.warning("yt-dlp is not installed; track search unavailable")
-            return []
+        except ImportError as exc:
+            raise RuntimeError("yt-dlp is not installed; track search unavailable") from exc
 
         ydl_opts: Dict[str, Any] = {
             "quiet": True,
@@ -1300,9 +1371,9 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
-        except Exception as exc:
-            logger.warning("yt-dlp track search failed: %s", exc)
-            return []
+        except Exception:
+            logger.exception("yt-dlp track search failed")
+            raise
 
         entries: List[Dict[str, Any]] = info.get("entries") or []
         tracks: List[pb.Track] = []
@@ -1367,7 +1438,9 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
             )
             return pb.SearchResponse()
 
-        limit = request.limit if request.limit > 0 else 20
+        limit = _page_limit(request.limit, 20)
+        offset = _page_offset(request.page_token, context)
+        fetch_limit = offset + limit + 1
         requested_types = set(request.types)
 
         type_filter: Dict[int, str] = {
@@ -1390,8 +1463,7 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         albums: List[pb.Album] = []
         artists: List[pb.Artist] = []
         playlists: List[pb.Playlist] = []
-
-        client = self._get_client()
+        next_page_token = ""
 
         # Use the unauthenticated search client for all discovery.
         search_client = self._search_ytm
@@ -1399,36 +1471,33 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         for media_type, ytm_filter in categories_to_fetch:
             try:
                 if media_type == pb.MEDIA_TYPE_TRACK:
-                    # yt-dlp unauthenticated YouTube search returns actual
-                    # music videos with reliable metadata and playable videoIds.
-                    # The videoIds are later resolved by the authenticated
-                    # playback backend, keeping search and playback decoupled.
-                    tracks.extend(
-                        self._search_tracks_ytdlp(query=query, limit=limit)
-                    )
-                else:
-                    results = search_client.search(
-                        query=query, filter=ytm_filter, limit=limit
-                    )
-                    if not isinstance(results, list):
-                        continue
+                    raw_tracks = self._search_tracks_ytdlp(query=query, limit=fetch_limit)
+                    page, next_page_token = _paginate(raw_tracks, offset, limit)
+                    tracks.extend(page)
+                    continue
 
-                    for item in results[:limit]:
-                        if not isinstance(item, dict):
-                            continue
-
-                        if media_type == pb.MEDIA_TYPE_ALBUM:
-                            albums.append(_ytm_album_to_pb(item))
-                        elif media_type == pb.MEDIA_TYPE_ARTIST:
-                            artists.append(_ytm_artist_to_pb(item))
-                        elif media_type == pb.MEDIA_TYPE_PLAYLIST:
-                            playlists.append(_ytm_playlist_to_pb(item))
-            except Exception as exc:
-                logger.warning(
-                    "Search error for filter=%s: %s",
-                    ytm_filter if media_type != pb.MEDIA_TYPE_TRACK else "tracks",
-                    exc,
+                results = search_client.search(
+                    query=query, filter=ytm_filter, limit=fetch_limit
                 )
+                if not isinstance(results, list):
+                    raise TypeError("unexpected search response format")
+                page, category_next_token = _paginate(results, offset, limit)
+                if category_next_token:
+                    next_page_token = category_next_token
+
+                for item in page:
+                    if not isinstance(item, dict):
+                        continue
+                    if media_type == pb.MEDIA_TYPE_ALBUM:
+                        albums.append(_ytm_album_to_pb(item))
+                    elif media_type == pb.MEDIA_TYPE_ARTIST:
+                        artists.append(_ytm_artist_to_pb(item))
+                    elif media_type == pb.MEDIA_TYPE_PLAYLIST:
+                        playlists.append(_ytm_playlist_to_pb(item))
+            except Exception as exc:
+                logger.warning("Search error for filter=%s: %s", ytm_filter, exc)
+                _abort_api_error(context, "search failed", exc)
+                return pb.SearchResponse()
 
         logger.info(
             "Search('%s') → tracks=%d albums=%d artists=%d playlists=%d",
@@ -1444,7 +1513,7 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
             albums=albums,
             artists=artists,
             playlists=playlists,
-            next_page_token="",
+            next_page_token=next_page_token,
         )
 
     # -----------------------------------------------------------------------
@@ -1468,12 +1537,7 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
             raw_suggestions = client.get_search_suggestions(query)
         except Exception as exc:
             logger.error("SearchSuggestions error: %s", exc, exc_info=True)
-            context.abort(
-                grpc.StatusCode.INTERNAL,
-                f"What failed: failed to fetch suggestions: {exc}. "
-                "How to fix: check your network connection or try again later. "
-                "Fallback: public search is still available without login.",
-            )
+            _abort_api_error(context, "failed to fetch suggestions", exc)
             return
 
         if not isinstance(raw_suggestions, list):
@@ -1528,12 +1592,7 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
             song_info = client.get_song(video_id)
         except Exception as exc:
             logger.error("GetTrackDetails error for %s: %s", video_id, exc, exc_info=True)
-            context.abort(
-                grpc.StatusCode.NOT_FOUND,
-                f"What failed: track not found or API error: {exc}. "
-                "How to fix: verify the track ID or try again later. "
-                "Fallback: public search is still available without login.",
-            )
+            _abort_api_error(context, "failed to fetch track", exc)
             return pb.GetTrackDetailsResponse()
 
         video_details = song_info.get("videoDetails", {}) if isinstance(song_info, dict) else {}
@@ -1799,39 +1858,24 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
     ) -> pb.GetUserLibraryResponse:
         """Return the authenticated user's liked songs library."""
         client = self._require_auth(context)
-
-        limit = request.limit if request.limit > 0 else 25
+        limit = _page_limit(request.limit, 25)
+        offset = _page_offset(request.page_token, context)
 
         try:
-            liked_songs = client.get_liked_songs(limit=limit)
+            liked_songs = client.get_liked_songs(limit=offset + limit + 1)
         except Exception as exc:
             logger.error("GetUserLibrary error: %s", exc, exc_info=True)
-            error_str = str(exc).lower()
-            if "unauthorized" in error_str or "authentication" in error_str or "sign in" in error_str:
-                context.abort(
-                    grpc.StatusCode.UNAUTHENTICATED,
-                    "What failed: your session expired or you are not logged in. "
-                    "How to fix: re-authenticate in Settings using OAuth or browser cookies. "
-                    "Fallback: public search is still available without login.",
-                )
-            else:
-                context.abort(
-                    grpc.StatusCode.INTERNAL,
-                    f"What failed: failed to fetch library: {exc}. "
-                    "How to fix: check your network connection or try again later. "
-                    "Fallback: public search is still available without login.",
-                )
+            _abort_api_error(context, "failed to fetch library", exc)
             return pb.GetUserLibraryResponse()
 
-        tracks: List[pb.Track] = []
-        raw_tracks = liked_songs.get("tracks", []) if isinstance(liked_songs, dict) else []
-
-        for item in raw_tracks:
-            if isinstance(item, dict):
-                tracks.append(_ytm_track_to_pb(item))
+        if not isinstance(liked_songs, dict) or not isinstance(liked_songs.get("tracks"), list):
+            _abort_api_error(context, "failed to fetch library", TypeError("unexpected library response format"))
+            return pb.GetUserLibraryResponse()
+        raw_tracks, next_page_token = _paginate(liked_songs["tracks"], offset, limit)
+        tracks = [_ytm_track_to_pb(item) for item in raw_tracks if isinstance(item, dict)]
 
         logger.info("GetUserLibrary: returning %d liked tracks", len(tracks))
-        return pb.GetUserLibraryResponse(tracks=tracks, next_page_token="")
+        return pb.GetUserLibraryResponse(tracks=tracks, next_page_token=next_page_token)
 
     # -----------------------------------------------------------------------
     # GetUserPlaylists
@@ -1844,53 +1888,40 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
     ) -> pb.GetUserPlaylistsResponse:
         """Return the authenticated user's playlists."""
         client = self._require_auth(context)
-
-        limit = request.limit if request.limit > 0 else 50
+        limit = _page_limit(request.limit, 50)
+        offset = _page_offset(request.page_token, context)
 
         try:
-            raw_playlists = client.get_library_playlists(limit=limit)
+            raw_playlists = client.get_library_playlists(limit=offset + limit + 1)
         except Exception as exc:
             logger.error("GetUserPlaylists error: %s", exc, exc_info=True)
-            error_str = str(exc).lower()
-            if "unauthorized" in error_str or "authentication" in error_str or "sign in" in error_str:
-                context.abort(
-                    grpc.StatusCode.UNAUTHENTICATED,
-                    "What failed: your session expired or you are not logged in. "
-                    "How to fix: re-authenticate in Settings using OAuth or browser cookies. "
-                    "Fallback: public search is still available without login.",
-                )
-            else:
-                context.abort(
-                    grpc.StatusCode.INTERNAL,
-                    f"What failed: failed to fetch playlists: {exc}. "
-                    "How to fix: check your network connection or try again later. "
-                    "Fallback: public search is still available without login.",
-                )
+            _abort_api_error(context, "failed to fetch playlists", exc)
             return pb.GetUserPlaylistsResponse()
 
+        if not isinstance(raw_playlists, list):
+            _abort_api_error(context, "failed to fetch playlists", TypeError("unexpected playlists response format"))
+            return pb.GetUserPlaylistsResponse()
+        page, next_page_token = _paginate(raw_playlists, offset, limit)
         playlists: List[pb.Playlist] = []
+        for item in page:
+            if not isinstance(item, dict):
+                continue
 
-        if isinstance(raw_playlists, list):
-            for item in raw_playlists[:limit]:
-                if not isinstance(item, dict):
-                    continue
-
-                browse_id = item.get("playlistId") or item.get("browseId") or ""
-                title = item.get("title") or ""
-                count = _safe_int(item.get("count") or item.get("trackCount"))
-                thumbnails = _thumbnails_to_images(item.get("thumbnails"))
-
-                playlists.append(
-                    pb.Playlist(
-                        id=browse_id,
-                        title=title,
-                        track_count=count,
-                        images=thumbnails,
-                    )
+            browse_id = item.get("playlistId") or item.get("browseId") or ""
+            title = item.get("title") or ""
+            count = _safe_int(item.get("count") or item.get("trackCount"))
+            thumbnails = _thumbnails_to_images(item.get("thumbnails"))
+            playlists.append(
+                pb.Playlist(
+                    id=browse_id,
+                    title=title,
+                    track_count=count,
+                    images=thumbnails,
                 )
+            )
 
         logger.info("GetUserPlaylists: returning %d playlists", len(playlists))
-        return pb.GetUserPlaylistsResponse(playlists=playlists, next_page_token="")
+        return pb.GetUserPlaylistsResponse(playlists=playlists, next_page_token=next_page_token)
 
     # -----------------------------------------------------------------------
     # GetPlaylistDetails
@@ -1911,19 +1942,15 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
             )
             return pb.GetPlaylistDetailsResponse()
 
-        limit = request.limit if request.limit > 0 else 100
+        limit = _page_limit(request.limit, 100)
+        offset = _page_offset(request.page_token, context)
         client = self._get_client()
 
         try:
-            raw = client.get_playlist(playlistId=playlist_id, limit=limit)
+            raw = client.get_playlist(playlistId=playlist_id, limit=offset + limit + 1)
         except Exception as exc:
             logger.error("GetPlaylistDetails error for %s: %s", playlist_id, exc, exc_info=True)
-            context.abort(
-                grpc.StatusCode.NOT_FOUND,
-                f"What failed: playlist not found or API error: {exc}. "
-                "How to fix: verify the playlist ID or try again later. "
-                "Fallback: public search is still available without login.",
-            )
+            _abort_api_error(context, "failed to fetch playlist", exc)
             return pb.GetPlaylistDetailsResponse()
 
         if not isinstance(raw, dict):
@@ -1951,18 +1978,15 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
             track_count=track_count,
         )
 
-        tracks: List[pb.Track] = []
         raw_tracks = raw.get("tracks") or []
-
-        for item in raw_tracks[:limit]:
-            if not isinstance(item, dict):
-                continue
-
-            video_id = item.get("videoId") or ""
-            if not video_id:
-                continue
-
-            tracks.append(_ytm_track_to_pb(item))
+        if not isinstance(raw_tracks, list):
+            _abort_api_error(context, "failed to fetch playlist", TypeError("unexpected playlist tracks format"))
+            return pb.GetPlaylistDetailsResponse()
+        page, next_page_token = _paginate(raw_tracks, offset, limit)
+        tracks: List[pb.Track] = []
+        for item in page:
+            if isinstance(item, dict) and item.get("videoId"):
+                tracks.append(_ytm_track_to_pb(item))
 
         logger.info(
             "GetPlaylistDetails: playlist_id=%s title='%s' tracks=%d",
@@ -1974,5 +1998,5 @@ class MusicProviderServicer(pb_grpc.MusicProviderServiceServicer):
         return pb.GetPlaylistDetailsResponse(
             playlist=playlist_pb,
             tracks=tracks,
-            next_page_token="",
+            next_page_token=next_page_token,
         )
