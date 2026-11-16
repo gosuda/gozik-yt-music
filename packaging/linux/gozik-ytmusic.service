@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/share/gozik/ytmusic/gozik-yt-music-server --port 50052
+ExecStart=%h/.local/share/gozik/ytmusic/gozik-yt-music-server/gozik-yt-music-server --port 50052
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

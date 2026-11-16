@@ -1,0 +1,58 @@
+#!/bin/bash
+set -euo pipefail
+
+HERE="$(dirname "$(readlink -f "${0}")")"
+BINARY_NAME='gozik-yt-music-server'
+INSTALL_DIR="${HOME}/.local/share/gozik/ytmusic"
+SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
+UNIT_NAME='gozik-ytmusic.service'
+LEGACY_UNIT_NAME='gozik-yt-music-server.service'
+UNIT_SRC="${HERE}/usr/lib/systemd/user/${UNIT_NAME}"
+UNIT_DST="${SYSTEMD_USER_DIR}/${UNIT_NAME}"
+BUNDLE_SRC="${HERE}/usr/bin/${BINARY_NAME}"
+BUNDLE_DST="${INSTALL_DIR}/${BINARY_NAME}"
+
+systemctl_user() {
+  env -u LD_LIBRARY_PATH -u LD_PRELOAD systemctl --user "$@"
+}
+
+systemd_available() {
+  command -v systemctl >/dev/null 2>&1 && \
+    systemctl_user show-environment >/dev/null 2>&1
+}
+
+mkdir -p "${INSTALL_DIR}" "${SYSTEMD_USER_DIR}"
+CHANGED=0
+if [[ ! -d "${BUNDLE_DST}" ]] || ! diff -rq "${BUNDLE_SRC}" "${BUNDLE_DST}" >/dev/null 2>&1; then
+  echo "[gozik-ytmusic] Installing bundle to ${BUNDLE_DST}"
+  rm -rf "${BUNDLE_DST}"
+  cp -a "${BUNDLE_SRC}" "${BUNDLE_DST}"
+  chmod -R +x "${BUNDLE_DST}"
+  CHANGED=1
+fi
+
+UNIT_TMP="$(mktemp "${SYSTEMD_USER_DIR}/.${UNIT_NAME}.XXXXXX")"
+trap 'rm -f "${UNIT_TMP}"' EXIT
+sed "s|%h/.local/share/gozik/ytmusic/${BINARY_NAME}/${BINARY_NAME}|${BUNDLE_DST}/${BINARY_NAME}|g" \
+  "${UNIT_SRC}" > "${UNIT_TMP}"
+if [[ ! -f "${UNIT_DST}" ]] || ! cmp -s "${UNIT_TMP}" "${UNIT_DST}"; then
+  echo "[gozik-ytmusic] Installing systemd unit to ${UNIT_DST}"
+  mv "${UNIT_TMP}" "${UNIT_DST}"
+  CHANGED=1
+fi
+
+if systemd_available; then
+  systemctl_user disable --now "${LEGACY_UNIT_NAME}" >/dev/null 2>&1 || true
+  systemctl_user daemon-reload
+  systemctl_user enable "${UNIT_NAME}"
+  if [[ "${CHANGED}" -eq 1 ]] || ! systemctl_user is-active "${UNIT_NAME}" >/dev/null 2>&1; then
+    systemctl_user restart "${UNIT_NAME}"
+    echo '[gozik-ytmusic] Daemon registered and started via systemd.'
+  else
+    echo '[gozik-ytmusic] Daemon already running via systemd.'
+  fi
+  exit 0
+fi
+
+echo '[gozik-ytmusic] systemd not available; starting server directly.'
+exec "${BUNDLE_DST}/${BINARY_NAME}" "$@"
