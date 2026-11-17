@@ -18,6 +18,7 @@ Authentication Architecture (three-tier fallback):
          cookiesfrombrowser.
     3. Unauthenticated public mode (last resort)
        - Search, GetTrackDetails, and ResolveStream work without login.
+       - Streaming retries in this mode when authenticated extraction fails.
        - Personal-data RPCs (GetUserLibrary, GetUserPlaylists) return
          UNAUTHENTICATED with an actionable remediation message.
 """

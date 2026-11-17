@@ -503,7 +503,7 @@ git push origin v1.0.0
 | `grpcio` | 1.81.0 | gRPC server runtime |
 | `grpcio-tools` | 1.81.0 | Proto compilation (`codegen.sh`) |
 | `ytmusicapi` | 1.12.1 | YouTube Music API client |
-| `yt-dlp` | 2025.1.26 | Audio stream URL extraction |
+| `yt-dlp` | 2026.11.16.232655 (nightly) | Audio stream URL extraction |
 | `pyinstaller` | 6.x | Python application bundler |
 
 ---
