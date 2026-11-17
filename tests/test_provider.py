@@ -179,6 +179,48 @@ class ProviderTest(unittest.TestCase):
             )
         self.assertEqual(caught.exception.code, grpc.StatusCode.PERMISSION_DENIED)
 
+    def test_stream_retries_without_browser_cookies(self):
+        calls = []
+
+        class DownloadError(Exception):
+            pass
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                self.options = options
+                calls.append(options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def extract_info(self, url, download):
+                if "cookiefile" in self.options:
+                    raise DownloadError("The page needs to be reloaded")
+                return {"url": "https://example.com/stream", "format_id": "251", "formats": []}
+
+        fake_yt_dlp = SimpleNamespace(
+            YoutubeDL=FakeYoutubeDL,
+            utils=SimpleNamespace(DownloadError=DownloadError),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cookie_file = Path(temp_dir) / "cookies.txt"
+            cookie_file.write_text("dummy")
+            with mock.patch.object(provider, "_get_node_path", return_value=None), mock.patch.object(
+                provider, "_load_auth_file", return_value={"cookie": "session=dummy", "user-agent": "dummy"}
+            ), mock.patch.object(
+                provider, "_write_netscape_cookie_file", return_value=str(cookie_file)
+            ), mock.patch.dict(provider.sys.modules, {"yt_dlp": fake_yt_dlp}):
+                stream_url, _, _, _ = provider._resolve_stream_url("video", pb.AUDIO_QUALITY_HIGH)
+
+        self.assertEqual(stream_url, "https://example.com/stream")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("cookiefile", calls[0])
+        self.assertNotIn("cookiefile", calls[1])
+        self.assertNotIn("http_headers", calls[1])
+
     def test_finds_pyinstaller_internal_node(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             executable = Path(temp_dir) / "gozik-yt-music-server"

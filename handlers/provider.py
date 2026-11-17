@@ -558,10 +558,28 @@ def _resolve_stream_url(video_id: str, quality: int) -> Tuple[str, Dict[str, str
                 logger.debug("Using stored User-Agent for streaming")
 
         url = f"https://music.youtube.com/watch?v={video_id}"
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-        except yt_dlp.utils.DownloadError as exc:
+        attempts = [ydl_opts]
+        if cookie_path:
+            public_opts = dict(ydl_opts)
+            public_opts.pop("cookiefile", None)
+            public_opts.pop("http_headers", None)
+            attempts.append(public_opts)
+
+        info = None
+        extraction_error = None
+        for index, attempt_opts in enumerate(attempts):
+            try:
+                with yt_dlp.YoutubeDL(attempt_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                extraction_error = None
+                break
+            except yt_dlp.utils.DownloadError as exc:
+                extraction_error = exc
+                if index + 1 < len(attempts):
+                    logger.warning("Authenticated stream extraction failed; retrying without browser cookies")
+
+        if extraction_error is not None:
+            exc = extraction_error
             error_msg = str(exc).lower()
             if "sign in to confirm" in error_msg or "bot" in error_msg:
                 raise RuntimeError(
