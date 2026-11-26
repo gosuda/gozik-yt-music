@@ -93,7 +93,10 @@ jobs:
           cache-dependency-path: installer/go/go.sum
       - name: Verify release Go cache isolation
         shell: bash
-        run: test -z "$(go env GOCACHEPROG)"
+        run: |
+          set -euo pipefail
+          cache_program=$(go env GOCACHEPROG)
+          test -z "$cache_program"
 
       - name: Install Fyne build dependencies
         working-directory: installer/go
@@ -190,7 +193,10 @@ jobs:
           cache-dependency-path: installer/go/go.sum
       - name: Verify release Go cache isolation
         shell: bash
-        run: test -z "$(go env GOCACHEPROG)"
+        run: |
+          set -euo pipefail
+          cache_program=$(go env GOCACHEPROG)
+          test -z "$cache_program"
 
       - name: Install Fyne build dependencies
         working-directory: installer/go
@@ -287,7 +293,10 @@ jobs:
           cache-dependency-path: installer/go/go.sum
       - name: Verify release Go cache isolation
         shell: bash
-        run: test -z "$(go env GOCACHEPROG)"
+        run: |
+          set -euo pipefail
+          cache_program=$(go env GOCACHEPROG)
+          test -z "$cache_program"
 
       - name: Test installer
         working-directory: installer/go
@@ -388,7 +397,10 @@ jobs:
           cache-dependency-path: installer/go/go.sum
       - name: Verify release Go cache isolation
         shell: bash
-        run: test -z "$(go env GOCACHEPROG)"
+        run: |
+          set -euo pipefail
+          cache_program=$(go env GOCACHEPROG)
+          test -z "$cache_program"
 
       - name: Install MinGW
         working-directory: installer/go
