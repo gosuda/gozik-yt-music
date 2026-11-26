@@ -12,6 +12,7 @@ concurrency:
 
 env:
   GOCACHEPROG: ""
+  GOENV: "off"
 
 jobs:
   build-linux-amd64:
@@ -90,6 +91,10 @@ jobs:
           cache: false
           go-version: '1.21'
           cache-dependency-path: installer/go/go.sum
+      - name: Verify release Go cache isolation
+        shell: bash
+        run: test -z "$(go env GOCACHEPROG)"
+
       - name: Install Fyne build dependencies
         working-directory: installer/go
         run: |
@@ -183,6 +188,10 @@ jobs:
           cache: false
           go-version: '1.21'
           cache-dependency-path: installer/go/go.sum
+      - name: Verify release Go cache isolation
+        shell: bash
+        run: test -z "$(go env GOCACHEPROG)"
+
       - name: Install Fyne build dependencies
         working-directory: installer/go
         run: |
@@ -276,6 +285,10 @@ jobs:
           cache: false
           go-version: '1.21'
           cache-dependency-path: installer/go/go.sum
+      - name: Verify release Go cache isolation
+        shell: bash
+        run: test -z "$(go env GOCACHEPROG)"
+
       - name: Test installer
         working-directory: installer/go
         run: go test ./...
@@ -373,6 +386,10 @@ jobs:
           cache: false
           go-version: '1.21'
           cache-dependency-path: installer/go/go.sum
+      - name: Verify release Go cache isolation
+        shell: bash
+        run: test -z "$(go env GOCACHEPROG)"
+
       - name: Install MinGW
         working-directory: installer/go
         run: choco install mingw --no-progress
