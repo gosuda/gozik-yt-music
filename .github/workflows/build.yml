@@ -148,7 +148,7 @@ jobs:
           path: dist/gozik-yt-music-server-linux-arm64.tar.gz
 
   build-macos-arm64:
-    runs-on: macos-latest
+    runs-on: depot-macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -348,7 +348,7 @@ jobs:
 
   build-installer-macos-arm64:
     name: Build Installer (macOS ARM64)
-    runs-on: macos-latest
+    runs-on: depot-macos-latest
     defaults:
       run:
         working-directory: installer/go
